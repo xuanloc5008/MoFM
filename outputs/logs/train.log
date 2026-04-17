@@ -1,0 +1,63 @@
+2026-04-17 20:52:41,867 [INFO] __main__ – Device: mps
+2026-04-17 20:52:41,867 [INFO] __main__ – Loading ACDC dataset…
+2026-04-17 20:52:43,885 [INFO] src.data.acdc – ACDC split → train: 1455 slices (80 patients), val: 386 slices (20 patients)
+2026-04-17 20:52:43,899 [INFO] __main__ – Apple Silicon MPS backend enabled.
+2026-04-17 20:52:43,899 [INFO] __main__ – If DataLoader workers stall on macOS, try setting training.num_workers to 0 or 1.
+2026-04-17 20:52:43,899 [INFO] __main__ – Dataset ready: train=1455 slices, val=386 slices
+2026-04-17 20:52:43,957 [INFO] __main__ – Model: TopoEvidentialUMamba  (11,633,069 parameters)
+2026-04-17 20:52:44,040 [WARNING] src.training.trainer – tensorboard is not installed; continuing without TensorBoard logging.
+2026-04-17 20:52:44,040 [INFO] src.training.trainer – Starting training: 200 epochs
+2026-04-17 20:52:44,041 [INFO] src.training.trainer – Model parameters: 11,633,069
+2026-04-17 21:10:28,250 [INFO] __main__ – Device: mps (Apple Silicon MPS)
+2026-04-17 21:10:28,251 [INFO] __main__ – Runtime profile: default -> mps | train_bs=4 val_bs=4 workers=0 amp=off
+2026-04-17 21:10:28,251 [INFO] __main__ – Loading ACDC dataset…
+2026-04-17 21:10:30,120 [INFO] src.data.acdc – ACDC split → train: 1455 slices (80 patients), val: 386 slices (20 patients)
+2026-04-17 21:10:30,129 [INFO] __main__ – Apple Silicon MPS backend enabled.
+2026-04-17 21:10:30,129 [INFO] __main__ – Dataset ready: train=1455 slices, val=386 slices
+2026-04-17 21:10:30,185 [INFO] __main__ – Model: TopoEvidentialUMamba  (11,633,069 parameters)
+2026-04-17 21:10:30,270 [WARNING] src.training.trainer – tensorboard is not installed; continuing without TensorBoard logging.
+2026-04-17 21:10:30,270 [INFO] src.training.trainer – Starting training: 200 epochs
+2026-04-17 21:10:30,270 [INFO] src.training.trainer – Model parameters: 11,633,069
+2026-04-17 21:16:03,325 [INFO] __main__ – Device: mps (Apple Silicon MPS)
+2026-04-17 21:16:03,325 [INFO] __main__ – Runtime profile: default -> mps | train_bs=4 val_bs=4 workers=0 amp=off
+2026-04-17 21:16:03,325 [INFO] __main__ – Loading ACDC dataset…
+2026-04-17 21:16:05,150 [INFO] src.data.acdc – ACDC split → train: 1455 slices (80 patients), val: 386 slices (20 patients)
+2026-04-17 21:16:05,160 [INFO] __main__ – Apple Silicon MPS backend enabled.
+2026-04-17 21:16:05,160 [INFO] __main__ – Dataset ready: train=1455 slices, val=386 slices
+2026-04-17 21:16:05,210 [INFO] __main__ – Model: TopoEvidentialUMamba  (11,633,069 parameters)
+2026-04-17 21:16:05,275 [WARNING] src.training.trainer – tensorboard is not installed; continuing without TensorBoard logging.
+2026-04-17 21:16:05,276 [INFO] src.training.trainer – Starting training: 200 epochs
+2026-04-17 21:16:05,276 [INFO] src.training.trainer – Model parameters: 11,633,069
+2026-04-17 21:42:53,439 [INFO] __main__ – Device: mps (Apple Silicon MPS)
+2026-04-17 21:42:53,439 [INFO] __main__ – Runtime profile: default -> mps | train_bs=4 val_bs=4 workers=0 amp=off
+2026-04-17 21:42:53,439 [INFO] __main__ – Loading ACDC dataset…
+2026-04-17 21:42:55,208 [INFO] src.data.acdc – ACDC split → train: 1455 slices (80 patients), val: 386 slices (20 patients)
+2026-04-17 21:42:55,217 [INFO] __main__ – Apple Silicon MPS backend enabled.
+2026-04-17 21:42:55,217 [INFO] __main__ – Dataset ready: train=1455 slices, val=386 slices
+2026-04-17 21:42:55,264 [INFO] __main__ – Model: TopoEvidentialUMamba  (11,633,069 parameters)
+2026-04-17 21:42:55,327 [WARNING] src.training.trainer – tensorboard is not installed; continuing without TensorBoard logging.
+2026-04-17 21:42:55,327 [INFO] src.training.trainer – Starting training: 200 epochs
+2026-04-17 21:42:55,327 [INFO] src.training.trainer – Model parameters: 11,633,069
+2026-04-17 21:44:51,371 [INFO] __main__ – Device: mps (Apple Silicon MPS)
+2026-04-17 21:44:51,371 [INFO] __main__ – Runtime profile: default -> mps | train_bs=4 val_bs=4 workers=0 amp=off
+2026-04-17 21:44:51,371 [INFO] __main__ – Loading ACDC dataset…
+2026-04-17 21:44:53,218 [INFO] src.data.acdc – ACDC split → train: 1455 slices (80 patients), val: 386 slices (20 patients)
+2026-04-17 21:44:53,228 [INFO] __main__ – Apple Silicon MPS backend enabled.
+2026-04-17 21:44:53,228 [INFO] __main__ – Dataset ready: train=1455 slices, val=386 slices
+2026-04-17 21:44:53,288 [INFO] __main__ – Model: TopoEvidentialUMamba  (11,633,069 parameters)
+2026-04-17 21:44:53,366 [WARNING] src.training.trainer – tensorboard is not installed; continuing without TensorBoard logging.
+2026-04-17 21:44:53,366 [INFO] src.training.trainer – Starting training: 200 epochs
+2026-04-17 21:44:53,366 [INFO] src.training.trainer – Model parameters: 11,633,069
+2026-04-17 22:59:09,454 [INFO] __main__ – Device: mps (Apple Silicon MPS)
+2026-04-17 22:59:09,454 [INFO] __main__ – Runtime profile: default -> mps | train_bs=4 val_bs=4 workers=0 amp=off
+2026-04-17 23:00:15,645 [INFO] __main__ – Device: mps (Apple Silicon MPS)
+2026-04-17 23:00:15,645 [INFO] __main__ – Runtime profile: default -> mps | train_bs=4 val_bs=4 workers=0 amp=off
+2026-04-17 23:00:45,350 [INFO] __main__ – Device: mps (Apple Silicon MPS)
+2026-04-17 23:00:45,351 [INFO] __main__ – Runtime profile: default -> mps | train_bs=4 val_bs=4 workers=0 amp=off
+2026-04-17 23:00:45,351 [INFO] __main__ – Loading preprocessed ACDC dataset from outputs/preprocessed/acdc…
+2026-04-17 23:00:45,367 [INFO] __main__ – Apple Silicon MPS backend enabled.
+2026-04-17 23:00:45,367 [INFO] __main__ – Dataset ready: train=1455 slices, val=386 slices
+2026-04-17 23:00:45,413 [INFO] __main__ – Model: TopoEvidentialUMamba  (11,633,069 parameters)
+2026-04-17 23:00:45,498 [WARNING] src.training.trainer – tensorboard is not installed; continuing without TensorBoard logging.
+2026-04-17 23:00:45,498 [INFO] src.training.trainer – Starting training: 200 epochs
+2026-04-17 23:00:45,498 [INFO] src.training.trainer – Model parameters: 11,633,069

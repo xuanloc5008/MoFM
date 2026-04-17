@@ -1,0 +1,150 @@
+project_name: "Topo-Evidential-U-Mamba"
+seed: 42
+
+paths:
+  # ── Exact directory names as provided ──────────────────────────────────
+  # Place datasets relative to the project root, OR use absolute paths.
+  #
+  # Expected structures:
+  #   ACDC-dataset/database/training/patient001/Info.cfg
+  #   ACDC-dataset/database/testing/patient101/...
+  #   M&M1/Testing/{ID}/{ID}_sa.nii.gz
+  #   M&M1/Training/Labeled/{ID}/{ID}_sa.nii.gz
+  #   M&M1/Validation/{ID}/{ID}_sa.nii.gz
+  #   M&M1/211230_M&M...csv
+  #   MnM2/dataset/{ID}/{ID}_SA_ED.nii.gz
+  #   MnM2/dataset_information.csv
+  acdc_root:   "/Volumes/Transcend/ACDC-dataset/database"   # → data/ACDC-dataset/database/training/
+  mnm1_root:   "/Volumes/Transcend/M&M1"           # → data/M&M1/Testing/, Validation/, Training/Labeled/
+  mnm2_root:   "/Volumes/Transcend/MnM2"           # → data/MnM2/dataset/027/027_SA_ED.nii.gz
+  output_dir:  "outputs"
+  preprocessed_acdc_root: "outputs/preprocessed/acdc"
+  checkpoint_dir: "outputs/checkpoints"
+  log_dir:     "outputs/logs"
+  figure_dir:  "outputs/figures"
+
+data:
+  num_classes: 4          # 0=BG, 1=RV, 2=Myo, 3=LV
+  class_names: ["BG", "RV", "Myo", "LV"]
+  spatial_size: [224, 224]   # 2-D slice size after crop/pad
+  in_channels: 1
+  # ACDC split: 100 patients → 80 train / 20 val
+  acdc_val_ratio: 0.20
+  use_preprocessed_acdc: true
+  cache_rate: 0.5            # MONAI cache fraction
+
+augmentation:
+  rand_rotate_prob: 0.6
+  rand_rotate_range: 0.2618   # ~15 degrees
+  rand_flip_prob: 0.0         # disabled by default for aligned cardiac SA MRI
+  rand_affine_prob: 0.6
+  rand_translate_range: [8, 8]
+  rand_shear_range: [0.025, 0.025]
+  rand_elastic_prob: 0.15
+  rand_elastic_spacing: [32, 32]
+  rand_elastic_magnitude: [1.0, 2.5]
+  rand_zoom_prob: 0.4
+  rand_zoom_range: [0.9, 1.1]
+  rand_gaussian_noise_prob: 0.15
+  rand_gaussian_noise_std: 0.03
+  rand_gaussian_smooth_prob: 0.1
+  rand_bias_field_prob: 0.25
+  rand_gibbs_noise_prob: 0.15
+  rand_adjust_contrast_prob: 0.2
+  rand_scale_intensity_prob: 0.15
+  rand_shift_intensity_prob: 0.15
+
+model:
+  feature_channels: [32, 64, 128, 256, 512]
+  ssm_d_state: 16
+  ssm_expand_factor: 2
+  projection_dim: 128      # TDA contrastive head
+  dropout: 0.1
+
+topology:
+  max_dimension: 1          # H0 + H1 persistence
+  filtration: "sublevel"
+  pd_threshold: 0.02        # min persistence to keep
+  wasserstein_p: 1          # W1 distance
+  cache_downsample_size: 64 # preprocessing resolution for cached topology vectors
+  cache_top_k: 8            # top persistence values kept per homology dimension
+  topo_positive_threshold: 0.6   # SimPD > θ+ → positive pair
+
+loss:
+  gamma: 0.5                # weight on LPD_SCon
+  lambda_t_schedule:        # EDL KL annealing
+    start: 0.0
+    end: 1.0
+    warmup_epochs: 20
+  temperature: 0.1          # contrastive τ
+
+training:
+  epochs: 200
+  batch_size: 8
+  num_workers: 4
+  learning_rate: 2.0e-4
+  weight_decay: 1.0e-5
+  lr_scheduler: "cosine"
+  warmup_epochs: 5
+  grad_clip: 1.0
+  val_interval: 10
+  save_best_metric: "val_dice_mean"
+
+runtime:
+  profiles:
+    # Applied first for every device, then overridden by the active backend
+    # profile below.
+    default: {}
+
+    # Stable profile for Apple Silicon / Metal.
+    # Keeps DataLoader single-process and uses smaller batches.
+    mps:
+      train_batch_size: 4
+      val_batch_size: 4
+      num_workers: 0
+      pin_memory: false
+      persistent_workers: false
+      prefetch_factor: null
+      non_blocking: false
+      use_amp: false
+      amp_dtype: "float32"
+      matmul_precision: "high"
+      cudnn_benchmark: false
+      cudnn_deterministic: false
+
+    # Generic CUDA profile: fast host/device transfer, persistent workers,
+    # AMP in BF16, and TF32 enabled for tensor-core throughput.
+    cuda:
+      num_workers: 8
+      pin_memory: true
+      persistent_workers: true
+      prefetch_factor: 4
+      non_blocking: true
+      use_amp: true
+      amp_dtype: "bfloat16"
+      allow_tf32: true
+      matmul_precision: "high"
+      cudnn_benchmark: true
+      cudnn_deterministic: false
+
+    # Specific override for NVIDIA L40 / L40S-class cards.
+    # Cached topology features remove the old per-batch CPU PH bottleneck, so
+    # we can push batch size and dataloader throughput harder here.
+    cuda_l40:
+      train_batch_size: 24
+      val_batch_size: 48
+      num_workers: 12
+      prefetch_factor: 6
+      pin_memory: true
+      persistent_workers: true
+      non_blocking: true
+      use_amp: true
+      amp_dtype: "bfloat16"
+      allow_tf32: true
+      matmul_precision: "high"
+      cudnn_benchmark: true
+
+evaluation:
+  hausdorff_percentile: 95   # HD95
+  ece_bins: 15
+  uncertainty_threshold: 0.5
