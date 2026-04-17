@@ -107,6 +107,12 @@ def get_train_augmentation_transforms(cfg: Dict = None) -> list:
     rs_prob   = cfg.get("rand_shift_intensity_prob", 0.15)
     rsi_prob  = cfg.get("rand_scale_intensity_prob", 0.15)
     rgs_prob  = cfg.get("rand_gaussian_smooth_prob", 0.1)
+    rgs_sigma = tuple(cfg.get("rand_gaussian_smooth_sigma", [0.25, 0.8]))
+    rb_coeff  = tuple(cfg.get("rand_bias_field_coeff_range", [0.0, 0.08]))
+    rg_alpha  = tuple(cfg.get("rand_gibbs_alpha", [0.0, 0.5]))
+    rc_gamma  = tuple(cfg.get("rand_adjust_contrast_gamma", [0.85, 1.15]))
+    rsi_factor = cfg.get("rand_scale_intensity_factor", 0.1)
+    rs_offset  = cfg.get("rand_shift_intensity_offset", 0.05)
     affine_prob = cfg.get("rand_affine_prob", max(rr_prob, rz_prob))
     elastic_prob = cfg.get("rand_elastic_prob", 0.15)
     translate = cfg.get("rand_translate_range", [8, 8])
@@ -149,12 +155,12 @@ def get_train_augmentation_transforms(cfg: Dict = None) -> list:
 
         # ── Intensity augmentation (scanner-style artifacts) ──────────────
         RandGaussianNoised(keys=["image"], prob=rn_prob, std=rn_std),
-        RandGaussianSmoothd(keys=["image"], prob=rgs_prob, sigma_x=(0.25, 0.8), sigma_y=(0.25, 0.8)),
-        RandBiasFieldd(keys=["image"], prob=rb_prob, coeff_range=(0.0, 0.08)),
-        RandGibbsNoised(keys=["image"], prob=rg_prob, alpha=(0.0, 0.5)),
-        RandAdjustContrastd(keys=["image"], prob=rc_prob, gamma=(0.85, 1.15)),
-        RandScaleIntensityd(keys=["image"], prob=rsi_prob, factors=0.1),
-        RandShiftIntensityd(keys=["image"], prob=rs_prob, offsets=0.05),
+        RandGaussianSmoothd(keys=["image"], prob=rgs_prob, sigma_x=rgs_sigma, sigma_y=rgs_sigma),
+        RandBiasFieldd(keys=["image"], prob=rb_prob, coeff_range=rb_coeff),
+        RandGibbsNoised(keys=["image"], prob=rg_prob, alpha=rg_alpha),
+        RandAdjustContrastd(keys=["image"], prob=rc_prob, gamma=rc_gamma),
+        RandScaleIntensityd(keys=["image"], prob=rsi_prob, factors=rsi_factor),
+        RandShiftIntensityd(keys=["image"], prob=rs_prob, offsets=rs_offset),
     ]
 
 

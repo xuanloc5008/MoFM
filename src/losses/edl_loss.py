@@ -53,6 +53,7 @@ def mse_loss_edl(
     target: torch.Tensor,   # (B, H, W)   integer class labels
     alpha:  torch.Tensor,   # (B, K, H, W)
     S:      torch.Tensor,   # (B, 1, H, W)
+    class_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     L_MSE + L_Var for EDL.
@@ -62,13 +63,16 @@ def mse_loss_edl(
     K = probs.shape[1]
     # One-hot encode target: (B, K, H, W)
     y = F.one_hot(target, num_classes=K).permute(0, 3, 1, 2).float()
+    weights = 1.0
+    if class_weights is not None:
+        weights = class_weights.view(1, K, 1, 1)
 
     # MSE term
-    mse = ((y - probs) ** 2).sum(dim=1)    # (B, H, W)
+    mse = (weights * ((y - probs) ** 2)).sum(dim=1)    # (B, H, W)
 
     # Variance term — encourages high total evidence on correct pixels
     # S: (B, 1, H, W)  →  keep for broadcast with (B, K, H, W)
-    var = (probs * (1 - probs) / (S + 1)).sum(dim=1)   # (B, H, W)
+    var = (weights * (probs * (1 - probs) / (S + 1))).sum(dim=1)   # (B, H, W)
 
     return (mse + var).mean()
 
@@ -106,6 +110,64 @@ def kl_divergence_edl(
     return kl.mean()
 
 
+class SoftDiceLoss(nn.Module):
+    """
+    Soft multi-class Dice loss on probabilities.
+
+    By default this ignores background and averages Dice equally over the
+    foreground classes, which is useful when small structures such as RV are
+    under-optimised by pixel-dominant losses.
+    """
+
+    def __init__(
+        self,
+        include_background: bool = False,
+        smooth: float = 1e-6,
+        class_weights: list[float] | tuple[float, ...] | None = None,
+    ):
+        super().__init__()
+        self.include_background = include_background
+        self.smooth = smooth
+        if class_weights is None:
+            self.register_buffer("class_weights", None, persistent=False)
+        else:
+            weights = torch.tensor(class_weights, dtype=torch.float32)
+            self.register_buffer("class_weights", weights, persistent=True)
+
+    def forward(
+        self,
+        probs: torch.Tensor,   # (B, K, H, W)
+        target: torch.Tensor,  # (B, H, W)
+    ) -> torch.Tensor:
+        K = probs.shape[1]
+        start = 0 if self.include_background else 1
+        if start >= K:
+            return probs.sum() * 0.0
+
+        y = F.one_hot(target, num_classes=K).permute(0, 3, 1, 2).to(dtype=probs.dtype)
+        probs_fg = probs[:, start:]
+        y_fg = y[:, start:]
+
+        dims = (0, 2, 3)
+        intersection = (probs_fg * y_fg).sum(dim=dims)
+        denominator = probs_fg.sum(dim=dims) + y_fg.sum(dim=dims)
+        dice = (2.0 * intersection + self.smooth) / (denominator + self.smooth)
+
+        class_weights = self.class_weights
+        if class_weights is not None:
+            expected = K if self.include_background else (K - 1)
+            if class_weights.numel() != expected:
+                raise ValueError(
+                    f"dice class_weights length {class_weights.numel()} does not "
+                    f"match expected length {expected}"
+                )
+            weights = class_weights.to(device=probs.device, dtype=probs.dtype)
+            weights = weights / weights.sum().clamp_min(self.smooth)
+            return 1.0 - (dice * weights).sum()
+
+        return 1.0 - dice.mean()
+
+
 class EDLLoss(nn.Module):
     """
     Full pixel-wise EDL loss.
@@ -117,8 +179,13 @@ class EDLLoss(nn.Module):
     generating evidence on wrong classes.
     """
 
-    def __init__(self):
+    def __init__(self, class_weights: list[float] | tuple[float, ...] | None = None):
         super().__init__()
+        if class_weights is None:
+            self.register_buffer("class_weights", None, persistent=False)
+        else:
+            weights = torch.tensor(class_weights, dtype=torch.float32)
+            self.register_buffer("class_weights", weights, persistent=True)
 
     def forward(
         self,
@@ -131,7 +198,16 @@ class EDLLoss(nn.Module):
         """
         alpha, S, probs = evidence_to_dirichlet(evidence)
 
-        l_mse_var = mse_loss_edl(probs, target, alpha, S)
+        class_weights = self.class_weights
+        if class_weights is not None and class_weights.numel() != evidence.shape[1]:
+            raise ValueError(
+                f"class_weights length {class_weights.numel()} does not match "
+                f"num_classes {evidence.shape[1]}"
+            )
+        if class_weights is not None:
+            class_weights = class_weights.to(device=evidence.device, dtype=probs.dtype)
+
+        l_mse_var = mse_loss_edl(probs, target, alpha, S, class_weights=class_weights)
         l_kl      = kl_divergence_edl(alpha, target)
 
         loss = l_mse_var + lambda_t * l_kl

@@ -4,7 +4,7 @@ PD-Guided Supervised Contrastive Loss (LPD-SCon)
 Topology-guided contrastive learning in the bottleneck latent space.
 
 For each anchor i in mini-batch I:
-  - Positive set PPD(i) = {j : SimPD(x_i, x_j) > θ+}
+  - Positive set PPD(i) is mined from topology similarity
   - All others are treated as negatives
 
 L_PD-SCon = Σ_i  -1/|PPD(i)| * Σ_{p ∈ PPD(i)}
@@ -26,6 +26,8 @@ class PDSupervisedContrastiveLoss(nn.Module):
     Args:
         temperature         : τ in the InfoNCE formula
         positive_threshold  : θ+  — SimPD score above which a pair is positive
+        positive_top_k      : if set, keep only the top-k topology neighbours
+                              per anchor as positives
         min_positives       : skip anchor if it has fewer than this many positives
     """
 
@@ -33,11 +35,13 @@ class PDSupervisedContrastiveLoss(nn.Module):
         self,
         temperature:        float = 0.1,
         positive_threshold: float = 0.6,
+        positive_top_k:     int | None = None,
         min_positives:      int   = 1,
     ):
         super().__init__()
         self.temperature        = temperature
         self.positive_threshold = positive_threshold
+        self.positive_top_k     = positive_top_k
         self.min_positives      = min_positives
 
     def forward(
@@ -70,8 +74,18 @@ class PDSupervisedContrastiveLoss(nn.Module):
         eye_mask = torch.eye(B, dtype=torch.bool, device=device)
         logits = logits.masked_fill(eye_mask, -1e9)
 
-        # Positive mask: cached topology similarity > θ+ AND not the anchor itself
-        pos_mask = (topo_sim > self.positive_threshold) & (~eye_mask)
+        if self.positive_top_k is not None and self.positive_top_k > 0:
+            k = min(int(self.positive_top_k), max(B - 1, 0))
+            if k == 0:
+                pos_mask = torch.zeros_like(eye_mask)
+            else:
+                topo_rank = topo_sim.masked_fill(eye_mask, float("-inf"))
+                topk_idx = topo_rank.topk(k=k, dim=1).indices
+                pos_mask = torch.zeros_like(eye_mask)
+                pos_mask.scatter_(1, topk_idx, True)
+        else:
+            # Threshold-based positives remain available as a fallback.
+            pos_mask = (topo_sim > self.positive_threshold) & (~eye_mask)
 
         log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
         pos_mask_f = pos_mask.to(log_prob.dtype)

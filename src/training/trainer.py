@@ -6,7 +6,7 @@ Implements the end-to-end training loop for Topo-Evidential U-Mamba.
 Each batch:
   1. Forward pass → evidence, projections
   2. Load cached topology vectors for the mini-batch
-  3. Compute L_Total = Σ_p L_EDL(p) + γ * L_PD-SCon
+  3. Compute L_Total = Σ_p L_EDL(p) + β * L_Dice + γ * L_PD-SCon
   4. Backward + optimiser step
   5. Log metrics to TensorBoard
 
@@ -33,7 +33,7 @@ except ModuleNotFoundError:
     SummaryWriter = None
 
 from ..models.topo_evidential_umamba import TopoEvidentialUMamba
-from ..losses.edl_loss import EDLLoss, get_lambda_t
+from ..losses.edl_loss import EDLLoss, SoftDiceLoss, get_lambda_t
 from ..losses.contrastive_loss import PDSupervisedContrastiveLoss
 from ..evaluation.metrics import compute_segmentation_metrics, MetricAggregator
 from ..runtime import resolve_amp_dtype
@@ -81,19 +81,29 @@ class Trainer:
         self.num_classes  = data_cfg.get("num_classes",    4)
 
         self.gamma        = loss_cfg.get("gamma",          0.5)
+        self.dice_weight  = float(loss_cfg.get("dice_weight", 0.0))
         self.temperature  = loss_cfg.get("temperature",    0.1)
+        self.edl_class_weights = loss_cfg.get("edl_class_weights")
+        self.dice_include_background = bool(loss_cfg.get("dice_include_background", False))
+        self.dice_class_weights = loss_cfg.get("dice_class_weights")
         self.lambda_sched = loss_cfg.get("lambda_t_schedule", {})
         self.topo_threshold = topo_cfg.get("topo_positive_threshold", 0.6)
+        self.topo_positive_top_k = topo_cfg.get("topo_positive_top_k")
         self.non_blocking = runtime_cfg.get("non_blocking", False)
         self.use_amp = runtime_cfg.get("use_amp", False) and device.type == "cuda"
         self.amp_dtype = resolve_amp_dtype(runtime_cfg.get("amp_dtype", "float32"))
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
         # Loss functions
-        self.edl_loss = EDLLoss()
+        self.edl_loss = EDLLoss(class_weights=self.edl_class_weights)
+        self.dice_loss = SoftDiceLoss(
+            include_background=self.dice_include_background,
+            class_weights=self.dice_class_weights,
+        )
         self.con_loss = PDSupervisedContrastiveLoss(
             temperature=self.temperature,
             positive_threshold=self.topo_threshold,
+            positive_top_k=self.topo_positive_top_k,
         )
 
         # Optimiser
@@ -132,8 +142,22 @@ class Trainer:
         self.ckpt_dir = ckpt_dir
 
         self.best_val_dice = 0.0
+        self.best_val_metrics: Dict[str, float] = {
+            "val_dice_mean": 0.0,
+            "val_dice_rv": 0.0,
+            "val_dice_myo": 0.0,
+            "val_dice_lv": 0.0,
+        }
+        self.best_train_metrics: Dict[str, float] = {
+            "total": float("inf"),
+            "edl": float("inf"),
+            "dice": float("inf"),
+            "con": float("inf"),
+        }
         self.train_history: Dict[str, list] = {
-            "train_loss": [], "val_dice_mean": [],
+            "train_loss": [], "train_edl": [], "train_dice": [], "train_con": [],
+            "val_dice_mean": [],
+            "val_dice_rv": [], "val_dice_myo": [], "val_dice_lv": [],
             "val_hd95_mean": [], "lr": [],
         }
 
@@ -143,7 +167,7 @@ class Trainer:
 
     def _train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
-        agg = {"total": 0.0, "edl": 0.0, "con": 0.0}
+        agg = {"total": 0.0, "edl": 0.0, "dice": 0.0, "con": 0.0}
         n   = 0
 
         lambda_t = get_lambda_t(
@@ -170,16 +194,18 @@ class Trainer:
                 # ── Forward ──────────────────────────────────────────────
                 out = self.model(images, return_projections=True)
                 evidence    = out["evidence"]       # B K H W
+                probs       = out["probs"]          # B K H W
                 projections = out["projections"]    # B D
 
                 # ── L_EDL ────────────────────────────────────────────────
                 l_edl, edl_log = self.edl_loss(evidence, labels, lambda_t=lambda_t)
+                l_dice = self.dice_loss(probs, labels) if self.dice_weight > 0 else probs.sum() * 0.0
 
                 # ── L_PD-SCon ────────────────────────────────────────────
                 l_con = self.con_loss(projections, topo_vec)
 
                 # ── Total loss ───────────────────────────────────────────
-                loss = l_edl + self.gamma * l_con
+                loss = l_edl + self.dice_weight * l_dice + self.gamma * l_con
 
             # ── Backward ─────────────────────────────────────────────────
             self.optimizer.zero_grad(set_to_none=True)
@@ -197,12 +223,14 @@ class Trainer:
             B = images.shape[0]
             agg["total"] += loss.item() * B
             agg["edl"]   += l_edl.item() * B
+            agg["dice"]  += l_dice.item() * B
             agg["con"]   += l_con.item() * B
             n += B
 
             pbar.set_postfix({
                 "loss": f"{loss.item():.4f}",
                 "edl":  f"{l_edl.item():.4f}",
+                "dice": f"{l_dice.item():.4f}",
                 "con":  f"{l_con.item():.4f}",
             })
 
@@ -259,6 +287,10 @@ class Trainer:
 
             # Train
             train_metrics = self._train_epoch(epoch)
+            self.best_train_metrics["total"] = min(self.best_train_metrics["total"], train_metrics["total"])
+            self.best_train_metrics["edl"] = min(self.best_train_metrics["edl"], train_metrics["edl"])
+            self.best_train_metrics["dice"] = min(self.best_train_metrics["dice"], train_metrics["dice"])
+            self.best_train_metrics["con"] = min(self.best_train_metrics["con"], train_metrics["con"])
 
             # Scheduler step
             self.scheduler.step()
@@ -271,6 +303,11 @@ class Trainer:
 
                 # Save best model
                 vdice = val_metrics.get("val_dice_mean", 0.0)
+                for key in self.best_val_metrics:
+                    self.best_val_metrics[key] = max(
+                        self.best_val_metrics[key],
+                        val_metrics.get(key, 0.0),
+                    )
                 if vdice > self.best_val_dice:
                     self.best_val_dice = vdice
                     self._save_checkpoint(epoch, val_metrics, best=True)
@@ -284,7 +321,12 @@ class Trainer:
             log_msg = (
                 f"Epoch {epoch+1:3d}/{self.epochs} | "
                 f"Loss: {train_metrics['total']:.4f} "
-                f"(EDL: {train_metrics['edl']:.4f}, Con: {train_metrics['con']:.4f}) | "
+                f"(EDL: {train_metrics['edl']:.4f}, Dice: {train_metrics['dice']:.4f}, "
+                f"Con: {train_metrics['con']:.4f}) | "
+                f"Best Loss: {self.best_train_metrics['total']:.4f} "
+                f"(EDL: {self.best_train_metrics['edl']:.4f}, "
+                f"Dice: {self.best_train_metrics['dice']:.4f}, "
+                f"Con: {self.best_train_metrics['con']:.4f}) | "
                 f"LR: {lr:.2e} | {elapsed:.1f}s"
             )
             if val_metrics:
@@ -293,12 +335,17 @@ class Trainer:
                     f"(RV:{val_metrics.get('val_dice_rv',0):.3f} "
                     f"Myo:{val_metrics.get('val_dice_myo',0):.3f} "
                     f"LV:{val_metrics.get('val_dice_lv',0):.3f})"
+                    f" | Best Dice: {self.best_val_metrics['val_dice_mean']:.4f} "
+                    f"(RV:{self.best_val_metrics['val_dice_rv']:.3f} "
+                    f"Myo:{self.best_val_metrics['val_dice_myo']:.3f} "
+                    f"LV:{self.best_val_metrics['val_dice_lv']:.3f})"
                 )
             logger.info(log_msg)
 
             # TensorBoard
             self.writer.add_scalar("Train/Loss_Total",      train_metrics["total"], epoch)
             self.writer.add_scalar("Train/Loss_EDL",        train_metrics["edl"],   epoch)
+            self.writer.add_scalar("Train/Loss_Dice",       train_metrics["dice"],  epoch)
             self.writer.add_scalar("Train/Loss_Contrastive",train_metrics["con"],   epoch)
             self.writer.add_scalar("Train/LR",              lr,                     epoch)
             for k, v in val_metrics.items():
@@ -307,11 +354,28 @@ class Trainer:
 
             # History
             self.train_history["train_loss"].append(train_metrics["total"])
+            self.train_history["train_edl"].append(train_metrics["edl"])
+            self.train_history["train_dice"].append(train_metrics["dice"])
+            self.train_history["train_con"].append(train_metrics["con"])
             self.train_history["val_dice_mean"].append(val_metrics.get("val_dice_mean", None))
+            self.train_history["val_dice_rv"].append(val_metrics.get("val_dice_rv", None))
+            self.train_history["val_dice_myo"].append(val_metrics.get("val_dice_myo", None))
+            self.train_history["val_dice_lv"].append(val_metrics.get("val_dice_lv", None))
+            self.train_history["val_hd95_mean"].append(val_metrics.get("val_hd95_mean", None))
             self.train_history["lr"].append(lr)
 
         self.writer.close()
-        logger.info(f"Training complete. Best val Dice: {self.best_val_dice:.4f}")
+        logger.info(
+            "Training complete. "
+            f"Best Loss: {self.best_train_metrics['total']:.4f} "
+            f"(EDL: {self.best_train_metrics['edl']:.4f} "
+            f"Dice: {self.best_train_metrics['dice']:.4f} "
+            f"Con: {self.best_train_metrics['con']:.4f}) | "
+            f"Best val Dice: {self.best_val_metrics['val_dice_mean']:.4f} "
+            f"(RV:{self.best_val_metrics['val_dice_rv']:.3f} "
+            f"Myo:{self.best_val_metrics['val_dice_myo']:.3f} "
+            f"LV:{self.best_val_metrics['val_dice_lv']:.3f})"
+        )
         return self.train_history
 
     def _autocast_context(self):
@@ -328,6 +392,8 @@ class Trainer:
             "optim_state": self.optimizer.state_dict(),
             "metrics":     metrics,
             "best_dice":   self.best_val_dice,
+            "best_train_metrics": self.best_train_metrics,
+            "best_val_metrics": self.best_val_metrics,
             "cfg":         self.cfg,
         }, path)
         if best:
