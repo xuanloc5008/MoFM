@@ -333,10 +333,12 @@ class PreprocessedSliceDataset(Dataset):
         root_dir: str,
         transforms: Optional[Compose] = None,
         context_slices: int = 1,
+        require_barcodes: bool = False,
     ):
         self.root_dir = Path(root_dir)
         self.transforms = transforms
         self.context_slices = int(context_slices)
+        self.require_barcodes = bool(require_barcodes)
 
         if not self.root_dir.exists():
             raise FileNotFoundError(f"Preprocessed slice directory not found: {self.root_dir}")
@@ -369,6 +371,14 @@ class PreprocessedSliceDataset(Dataset):
                     f"Preprocessed file {self.files[0]} is missing 'topo_vec'. "
                     "Rebuild the cache with scripts/preprocess_acdc.py."
                 )
+            if self.require_barcodes:
+                required = {"barcode_h0", "barcode_h0_count", "barcode_h1", "barcode_h1_count"}
+                missing = sorted(required.difference(raw.files))
+                if missing:
+                    raise ValueError(
+                        f"Preprocessed file {self.files[0]} is missing barcode fields {missing}. "
+                        "Rebuild the cache with scripts/preprocess_acdc.py --overwrite."
+                    )
         self.context_indices = build_context_indices(self.records, self.context_slices)
 
     def __len__(self) -> int:
@@ -391,6 +401,12 @@ class PreprocessedSliceDataset(Dataset):
                         "group": str(raw["group"]),
                         "topo_vec": raw["topo_vec"].astype(np.float32, copy=True),
                     }
+                    if "barcode_h0" in raw:
+                        center_raw["barcode_h0"] = raw["barcode_h0"].astype(np.float32, copy=True)
+                        center_raw["barcode_h0_count"] = np.int32(raw["barcode_h0_count"])
+                    if "barcode_h1" in raw:
+                        center_raw["barcode_h1"] = raw["barcode_h1"].astype(np.float32, copy=True)
+                        center_raw["barcode_h1_count"] = np.int32(raw["barcode_h1_count"])
 
         if center_raw is None:
             raise RuntimeError(f"Failed to load center slice for index {idx}")
@@ -405,6 +421,12 @@ class PreprocessedSliceDataset(Dataset):
             "group": center_raw["group"],
             "topo_vec": center_raw["topo_vec"],
         }
+        if "barcode_h0" in center_raw:
+            sample["barcode_h0"] = center_raw["barcode_h0"]
+            sample["barcode_h0_count"] = center_raw["barcode_h0_count"]
+        if "barcode_h1" in center_raw:
+            sample["barcode_h1"] = center_raw["barcode_h1"]
+            sample["barcode_h1_count"] = center_raw["barcode_h1_count"]
 
         if self.transforms is not None:
             sample = self.transforms(sample)
@@ -420,5 +442,13 @@ class PreprocessedSliceDataset(Dataset):
             sample["spacing"] = torch.tensor(sample["spacing"], dtype=torch.float32)
         if "topo_vec" in sample and not isinstance(sample["topo_vec"], torch.Tensor):
             sample["topo_vec"] = torch.tensor(sample["topo_vec"], dtype=torch.float32)
+        if "barcode_h0" in sample and not isinstance(sample["barcode_h0"], torch.Tensor):
+            sample["barcode_h0"] = torch.tensor(sample["barcode_h0"], dtype=torch.float32)
+        if "barcode_h0_count" in sample and not isinstance(sample["barcode_h0_count"], torch.Tensor):
+            sample["barcode_h0_count"] = torch.tensor(sample["barcode_h0_count"], dtype=torch.long)
+        if "barcode_h1" in sample and not isinstance(sample["barcode_h1"], torch.Tensor):
+            sample["barcode_h1"] = torch.tensor(sample["barcode_h1"], dtype=torch.float32)
+        if "barcode_h1_count" in sample and not isinstance(sample["barcode_h1_count"], torch.Tensor):
+            sample["barcode_h1_count"] = torch.tensor(sample["barcode_h1_count"], dtype=torch.long)
 
         return sample

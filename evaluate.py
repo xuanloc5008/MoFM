@@ -241,7 +241,20 @@ def main():
     # ── Load model ──────────────────────────────────────────────────────────
     model = build_model(cfg)
     ckpt  = torch.load(args.checkpoint, map_location="cpu")
-    model.load_state_dict(ckpt["model_state"])
+    missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
+    allowed_prefixes = ("topology_encoder.",)
+    bad_missing = [k for k in missing if not k.startswith(allowed_prefixes)]
+    bad_unexpected = [k for k in unexpected if not k.startswith(allowed_prefixes)]
+    if bad_missing or bad_unexpected:
+        raise RuntimeError(
+            "Checkpoint/model mismatch beyond the experimental topology encoder: "
+            f"missing={bad_missing}, unexpected={bad_unexpected}"
+        )
+    if missing or unexpected:
+        logger.warning(
+            "Checkpoint loaded with experimental-topology compatibility mode. "
+            f"missing={missing}, unexpected={unexpected}"
+        )
     model = model.to(device).eval()
     logger.info(f"Loaded checkpoint: {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
 

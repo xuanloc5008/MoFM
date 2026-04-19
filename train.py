@@ -109,6 +109,8 @@ def main():
     context_slices = int(data_cfg.get("context_slices", data_cfg.get("in_channels", 1)))
 
     use_preprocessed = bool(data_cfg.get("use_preprocessed_acdc", False))
+    topo_exp_cfg = cfg.get("topology_experimental", {})
+    topology_experimental_enabled = bool(topo_exp_cfg.get("enabled", False))
     preprocessed_root = cfg["paths"].get(
         "preprocessed_acdc_root",
         os.path.join(output_dir, "preprocessed", "acdc"),
@@ -119,6 +121,12 @@ def main():
         raise RuntimeError(
             "Contrastive topology training now expects cached 'topo_vec' features. "
             "Run scripts/preprocess_acdc.py, then set data.use_preprocessed_acdc=true."
+        )
+    if topology_experimental_enabled and not use_preprocessed:
+        raise RuntimeError(
+            "Experimental barcode topology currently expects cached ACDC slices. "
+            "Run scripts/preprocess_acdc.py --overwrite and keep "
+            "data.use_preprocessed_acdc=true."
         )
 
     if use_preprocessed:
@@ -143,11 +151,13 @@ def main():
             os.path.join(preprocessed_root, "train"),
             transforms=train_transforms,
             context_slices=context_slices,
+            require_barcodes=topology_experimental_enabled,
         )
         val_dataset = PreprocessedSliceDataset(
             os.path.join(preprocessed_root, "val"),
             transforms=val_transforms,
             context_slices=context_slices,
+            require_barcodes=False,
         )
     else:
         logger.info("Loading ACDC dataset…")
@@ -217,7 +227,20 @@ def main():
 
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu")
-        model.load_state_dict(ckpt["model_state"])
+        missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
+        allowed_prefixes = ("topology_encoder.",)
+        bad_missing = [k for k in missing if not k.startswith(allowed_prefixes)]
+        bad_unexpected = [k for k in unexpected if not k.startswith(allowed_prefixes)]
+        if bad_missing or bad_unexpected:
+            raise RuntimeError(
+                "Checkpoint/model mismatch beyond the experimental topology encoder: "
+                f"missing={bad_missing}, unexpected={bad_unexpected}"
+            )
+        if missing or unexpected:
+            logger.warning(
+                "Checkpoint loaded with experimental-topology compatibility mode. "
+                f"missing={missing}, unexpected={unexpected}"
+            )
         logger.info(f"Resumed from {args.resume} (epoch {ckpt['epoch']})")
 
     # ── Trainer ─────────────────────────────────────────────────────────────

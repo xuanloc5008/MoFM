@@ -35,6 +35,7 @@ except ModuleNotFoundError:
 from ..models.topo_evidential_umamba import TopoEvidentialUMamba
 from ..losses.edl_loss import EDLLoss, SoftDiceLoss, get_lambda_t
 from ..losses.contrastive_loss import PDSupervisedContrastiveLoss
+from ..losses.topology_loss import TopologyAlignmentLoss
 from ..evaluation.metrics import compute_segmentation_metrics, MetricAggregator
 from ..runtime import resolve_amp_dtype
 
@@ -74,6 +75,7 @@ class Trainer:
         loss_cfg  = cfg.get("loss",     {})
         data_cfg  = cfg.get("data",     {})
         topo_cfg  = cfg.get("topology", {})
+        topo_exp_cfg = cfg.get("topology_experimental", {})
 
         self.epochs       = train_cfg.get("epochs",        200)
         self.val_interval = train_cfg.get("val_interval",  5)
@@ -89,10 +91,21 @@ class Trainer:
         self.lambda_sched = loss_cfg.get("lambda_t_schedule", {})
         self.topo_threshold = topo_cfg.get("topo_positive_threshold", 0.6)
         self.topo_positive_top_k = topo_cfg.get("topo_positive_top_k")
+        self.topology_exp_enabled = bool(topo_exp_cfg.get("enabled", False))
+        self.topo_align_weight = float(topo_exp_cfg.get("align_weight", 0.0))
+        self.topo_align_start_epoch = int(topo_exp_cfg.get("align_start_epoch", 0))
+        self.topo_align_confidence_gated = bool(topo_exp_cfg.get("confidence_gated", True))
         self.non_blocking = runtime_cfg.get("non_blocking", False)
         self.use_amp = runtime_cfg.get("use_amp", False) and device.type == "cuda"
         self.amp_dtype = resolve_amp_dtype(runtime_cfg.get("amp_dtype", "float32"))
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        grad_scaler_cls = getattr(getattr(torch, "amp", None), "GradScaler", None)
+        if grad_scaler_cls is not None:
+            try:
+                self.scaler = grad_scaler_cls("cuda", enabled=self.use_amp)
+            except TypeError:
+                self.scaler = grad_scaler_cls(enabled=self.use_amp)
+        else:
+            self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
         # Loss functions
         self.edl_loss = EDLLoss(class_weights=self.edl_class_weights)
@@ -105,6 +118,7 @@ class Trainer:
             positive_threshold=self.topo_threshold,
             positive_top_k=self.topo_positive_top_k,
         )
+        self.topo_align_loss = TopologyAlignmentLoss()
 
         # Optimiser
         self.optimizer = AdamW(
@@ -153,9 +167,10 @@ class Trainer:
             "edl": float("inf"),
             "dice": float("inf"),
             "con": float("inf"),
+            "topo_align": float("inf"),
         }
         self.train_history: Dict[str, list] = {
-            "train_loss": [], "train_edl": [], "train_dice": [], "train_con": [],
+            "train_loss": [], "train_edl": [], "train_dice": [], "train_con": [], "train_topo_align": [],
             "val_dice_mean": [],
             "val_dice_rv": [], "val_dice_myo": [], "val_dice_lv": [],
             "val_hd95_mean": [], "lr": [],
@@ -167,7 +182,7 @@ class Trainer:
 
     def _train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
-        agg = {"total": 0.0, "edl": 0.0, "dice": 0.0, "con": 0.0}
+        agg = {"total": 0.0, "edl": 0.0, "dice": 0.0, "con": 0.0, "topo_align": 0.0}
         n   = 0
 
         lambda_t = get_lambda_t(
@@ -189,6 +204,22 @@ class Trainer:
                     "data.use_preprocessed_acdc=true."
                 )
             topo_vec = topo_vec.to(self.device, non_blocking=self.non_blocking)
+            barcode_batch = None
+            if self.topology_exp_enabled:
+                needed = ("barcode_h0", "barcode_h0_count", "barcode_h1", "barcode_h1_count")
+                missing = [k for k in needed if k not in batch]
+                if missing:
+                    raise RuntimeError(
+                        "Experimental barcode topology is enabled but the training batch is "
+                        f"missing {missing}. Rebuild the cache with "
+                        "scripts/preprocess_acdc.py --overwrite."
+                    )
+                barcode_batch = {
+                    "barcode_h0": batch["barcode_h0"].to(self.device, non_blocking=self.non_blocking),
+                    "barcode_h0_count": batch["barcode_h0_count"].to(self.device, non_blocking=self.non_blocking),
+                    "barcode_h1": batch["barcode_h1"].to(self.device, non_blocking=self.non_blocking),
+                    "barcode_h1_count": batch["barcode_h1_count"].to(self.device, non_blocking=self.non_blocking),
+                }
 
             with self._autocast_context():
                 # ── Forward ──────────────────────────────────────────────
@@ -204,8 +235,36 @@ class Trainer:
                 # ── L_PD-SCon ────────────────────────────────────────────
                 l_con = self.con_loss(projections, topo_vec)
 
+                # ── Experimental barcode alignment ───────────────────────
+                topo_align_active = (
+                    self.topology_exp_enabled
+                    and barcode_batch is not None
+                    and self.topo_align_weight > 0.0
+                    and epoch >= self.topo_align_start_epoch
+                )
+                if topo_align_active:
+                    topo_embed = self.model.encode_topology(barcode_batch)
+                    sample_weights = None
+                    if self.topo_align_confidence_gated:
+                        # Confident predictions should obey topology more strongly.
+                        sample_weights = (
+                            1.0 - out["uncertainty"].detach().mean(dim=(1, 2, 3))
+                        ).clamp_min(0.0)
+                    l_topo_align = self.topo_align_loss(
+                        projections,
+                        topo_embed,
+                        sample_weights=sample_weights,
+                    )
+                else:
+                    l_topo_align = projections.sum() * 0.0
+
                 # ── Total loss ───────────────────────────────────────────
-                loss = l_edl + self.dice_weight * l_dice + self.gamma * l_con
+                loss = (
+                    l_edl
+                    + self.dice_weight * l_dice
+                    + self.gamma * l_con
+                    + self.topo_align_weight * l_topo_align
+                )
 
             # ── Backward ─────────────────────────────────────────────────
             self.optimizer.zero_grad(set_to_none=True)
@@ -225,6 +284,7 @@ class Trainer:
             agg["edl"]   += l_edl.item() * B
             agg["dice"]  += l_dice.item() * B
             agg["con"]   += l_con.item() * B
+            agg["topo_align"] += l_topo_align.item() * B
             n += B
 
             pbar.set_postfix({
@@ -232,6 +292,7 @@ class Trainer:
                 "edl":  f"{l_edl.item():.4f}",
                 "dice": f"{l_dice.item():.4f}",
                 "con":  f"{l_con.item():.4f}",
+                "talign": f"{l_topo_align.item():.4f}",
             })
 
         return {k: v / n for k, v in agg.items()}
@@ -291,6 +352,9 @@ class Trainer:
             self.best_train_metrics["edl"] = min(self.best_train_metrics["edl"], train_metrics["edl"])
             self.best_train_metrics["dice"] = min(self.best_train_metrics["dice"], train_metrics["dice"])
             self.best_train_metrics["con"] = min(self.best_train_metrics["con"], train_metrics["con"])
+            self.best_train_metrics["topo_align"] = min(
+                self.best_train_metrics["topo_align"], train_metrics["topo_align"]
+            )
 
             # Scheduler step
             self.scheduler.step()
@@ -322,11 +386,12 @@ class Trainer:
                 f"Epoch {epoch+1:3d}/{self.epochs} | "
                 f"Loss: {train_metrics['total']:.4f} "
                 f"(EDL: {train_metrics['edl']:.4f}, Dice: {train_metrics['dice']:.4f}, "
-                f"Con: {train_metrics['con']:.4f}) | "
+                f"Con: {train_metrics['con']:.4f}, TAlign: {train_metrics['topo_align']:.4f}) | "
                 f"Best Loss: {self.best_train_metrics['total']:.4f} "
                 f"(EDL: {self.best_train_metrics['edl']:.4f}, "
                 f"Dice: {self.best_train_metrics['dice']:.4f}, "
-                f"Con: {self.best_train_metrics['con']:.4f}) | "
+                f"Con: {self.best_train_metrics['con']:.4f}, "
+                f"TAlign: {self.best_train_metrics['topo_align']:.4f}) | "
                 f"LR: {lr:.2e} | {elapsed:.1f}s"
             )
             if val_metrics:
@@ -347,6 +412,7 @@ class Trainer:
             self.writer.add_scalar("Train/Loss_EDL",        train_metrics["edl"],   epoch)
             self.writer.add_scalar("Train/Loss_Dice",       train_metrics["dice"],  epoch)
             self.writer.add_scalar("Train/Loss_Contrastive",train_metrics["con"],   epoch)
+            self.writer.add_scalar("Train/Loss_TopologyAlign", train_metrics["topo_align"], epoch)
             self.writer.add_scalar("Train/LR",              lr,                     epoch)
             for k, v in val_metrics.items():
                 if v != float("inf"):
@@ -357,6 +423,7 @@ class Trainer:
             self.train_history["train_edl"].append(train_metrics["edl"])
             self.train_history["train_dice"].append(train_metrics["dice"])
             self.train_history["train_con"].append(train_metrics["con"])
+            self.train_history["train_topo_align"].append(train_metrics["topo_align"])
             self.train_history["val_dice_mean"].append(val_metrics.get("val_dice_mean", None))
             self.train_history["val_dice_rv"].append(val_metrics.get("val_dice_rv", None))
             self.train_history["val_dice_myo"].append(val_metrics.get("val_dice_myo", None))
@@ -370,7 +437,8 @@ class Trainer:
             f"Best Loss: {self.best_train_metrics['total']:.4f} "
             f"(EDL: {self.best_train_metrics['edl']:.4f} "
             f"Dice: {self.best_train_metrics['dice']:.4f} "
-            f"Con: {self.best_train_metrics['con']:.4f}) | "
+            f"Con: {self.best_train_metrics['con']:.4f} "
+            f"TAlign: {self.best_train_metrics['topo_align']:.4f}) | "
             f"Best val Dice: {self.best_val_metrics['val_dice_mean']:.4f} "
             f"(RV:{self.best_val_metrics['val_dice_rv']:.3f} "
             f"Myo:{self.best_val_metrics['val_dice_myo']:.3f} "

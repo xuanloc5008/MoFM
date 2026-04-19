@@ -22,6 +22,7 @@ from typing import Tuple, Dict, Optional, List
 from .umamba import UMamba
 from ..losses.contrastive_loss import ProjectionMLP
 from ..losses.edl_loss import evidence_to_dirichlet, uncertainty_map
+from .topology_encoder import BarcodeSLayerEncoder
 
 
 class EvidentialSegmentationHead(nn.Module):
@@ -61,9 +62,11 @@ class TopoEvidentialUMamba(nn.Module):
         expand:           int  = 2,
         dropout:          float = 0.1,
         projection_dim:   int  = 128,
+        topology_experimental: Optional[dict] = None,
     ):
         super().__init__()
         self.num_classes = num_classes
+        topology_experimental = topology_experimental or {}
 
         # ── Trunk: U-Mamba backbone ──────────────────────────────────────
         self.backbone = UMamba(
@@ -83,6 +86,19 @@ class TopoEvidentialUMamba(nn.Module):
             hid_dim=bottleneck_ch * 2,
             out_dim=projection_dim,
         )
+
+        self.topology_encoder: Optional[BarcodeSLayerEncoder]
+        if topology_experimental.get("enabled", False):
+            dims = topology_experimental.get("barcode_dims", [0, 1])
+            self.topology_encoder = BarcodeSLayerEncoder(
+                dims=dims,
+                elements_per_dim=int(topology_experimental.get("elements_per_dim", 16)),
+                output_dim=int(topology_experimental.get("embed_dim", projection_dim)),
+                hidden_dim=topology_experimental.get("hidden_dim"),
+                backend=str(topology_experimental.get("backend", "auto")),
+            )
+        else:
+            self.topology_encoder = None
 
         # ── Branch 2: Evidential Decoder Head ───────────────────────────
         self.seg_head = EvidentialSegmentationHead(decoder_ch, num_classes)
@@ -135,6 +151,11 @@ class TopoEvidentialUMamba(nn.Module):
         seg_map = out["probs"].argmax(dim=1)
         return seg_map, out["uncertainty"]
 
+    def encode_topology(self, barcode_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        if self.topology_encoder is None:
+            raise RuntimeError("Experimental topology encoder is not enabled in this model")
+        return self.topology_encoder(barcode_batch)
+
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
@@ -153,4 +174,5 @@ def build_model(cfg: dict) -> "TopoEvidentialUMamba":
         expand           = model_cfg.get("ssm_expand_factor", 2),
         dropout          = model_cfg.get("dropout",        0.1),
         projection_dim   = model_cfg.get("projection_dim", 128),
+        topology_experimental = cfg.get("topology_experimental", {}),
     )

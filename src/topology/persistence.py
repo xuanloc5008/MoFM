@@ -86,6 +86,90 @@ def summarize_persistence_diagrams(
     return np.asarray(features, dtype=np.float32)
 
 
+def diagrams_to_birth_lifetime(
+    diagrams: List[PersistenceDiagram],
+    max_dim: int = 1,
+) -> List[np.ndarray]:
+    """
+    Convert persistence diagrams to birth-lifetime coordinates.
+
+    Each output array has shape (N_d, 2) where the columns are:
+      [birth, lifetime]
+
+    Bars are sorted by decreasing lifetime so truncation keeps the most
+    topologically relevant information first.
+    """
+    packed: List[np.ndarray] = []
+    for dim in range(max_dim + 1):
+        pd = diagrams[dim] if dim < len(diagrams) else []
+        if len(pd) == 0:
+            packed.append(np.zeros((0, 2), dtype=np.float32))
+            continue
+
+        arr = np.asarray(pd, dtype=np.float32)
+        birth = arr[:, 0]
+        lifetime = np.clip(arr[:, 1] - arr[:, 0], a_min=0.0, a_max=None)
+        bl = np.stack([birth, lifetime], axis=1)
+        order = np.argsort(-bl[:, 1], kind="stable")
+        packed.append(bl[order].astype(np.float32, copy=False))
+    return packed
+
+
+def pack_barcode_arrays(
+    barcode_arrays: List[np.ndarray],
+    max_dim: int = 1,
+    max_points: int = 32,
+) -> dict[str, np.ndarray]:
+    """
+    Pack variable-length birth-lifetime arrays into fixed-width tensors.
+
+    Returns keys like:
+      barcode_h0, barcode_h0_count, barcode_h1, barcode_h1_count
+    """
+    packed: dict[str, np.ndarray] = {}
+    for dim in range(max_dim + 1):
+        arr = barcode_arrays[dim] if dim < len(barcode_arrays) else np.zeros((0, 2), dtype=np.float32)
+        keep = min(int(max_points), int(arr.shape[0]))
+        fixed = np.zeros((max_points, 2), dtype=np.float32)
+        if keep > 0:
+            fixed[:keep] = arr[:keep]
+        packed[f"barcode_h{dim}"] = fixed
+        packed[f"barcode_h{dim}_count"] = np.asarray(keep, dtype=np.int32)
+    return packed
+
+
+def compute_topology_cache(
+    image: np.ndarray,
+    max_dim: int = 1,
+    threshold: float = 0.02,
+    downsample_size: int = 64,
+    top_k: int = 8,
+    barcode_max_points: int = 32,
+) -> dict[str, np.ndarray]:
+    """
+    Compute both the legacy summary vector and richer barcode tensors.
+
+    This keeps the current repo behavior intact (`topo_vec`) while also caching
+    birth-lifetime barcode points for learnable topology encoders.
+    """
+    from scipy.ndimage import zoom as ndimage_zoom
+
+    img = np.squeeze(image).astype(np.float32, copy=False)
+    if img.ndim != 2:
+        raise ValueError(f"Expected a 2-D image, got shape {img.shape}")
+
+    scale = min(1.0, float(downsample_size) / float(max(img.shape)))
+    if scale < 1.0:
+        img = ndimage_zoom(img, scale, order=1)
+
+    diagrams = compute_persistence_diagram(img, max_dim=max_dim, threshold=threshold)
+    topo_vec = summarize_persistence_diagrams(diagrams, max_dim=max_dim, top_k=top_k)
+    barcode_arrays = diagrams_to_birth_lifetime(diagrams, max_dim=max_dim)
+    packed = pack_barcode_arrays(barcode_arrays, max_dim=max_dim, max_points=barcode_max_points)
+    packed["topo_vec"] = topo_vec.astype(np.float32, copy=False)
+    return packed
+
+
 def compute_topology_vector(
     image: np.ndarray,
     max_dim: int = 1,
@@ -100,18 +184,14 @@ def compute_topology_vector(
     resulting persistence diagrams are summarized into a feature vector that is
     cheap to cache on disk and cheap to compare on GPU during training.
     """
-    from scipy.ndimage import zoom as ndimage_zoom
-
-    img = np.squeeze(image).astype(np.float32, copy=False)
-    if img.ndim != 2:
-        raise ValueError(f"Expected a 2-D image, got shape {img.shape}")
-
-    scale = min(1.0, float(downsample_size) / float(max(img.shape)))
-    if scale < 1.0:
-        img = ndimage_zoom(img, scale, order=1)
-
-    diagrams = compute_persistence_diagram(img, max_dim=max_dim, threshold=threshold)
-    return summarize_persistence_diagrams(diagrams, max_dim=max_dim, top_k=top_k)
+    return compute_topology_cache(
+        image=image,
+        max_dim=max_dim,
+        threshold=threshold,
+        downsample_size=downsample_size,
+        top_k=top_k,
+        barcode_max_points=max(top_k, 1),
+    )["topo_vec"]
 
 
 def compute_persistence_diagram(

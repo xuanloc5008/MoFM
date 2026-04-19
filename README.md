@@ -148,6 +148,7 @@ Outputs:
 ## Roadmap
 
 - [ACDC-only roadmap to reach ACDC > 0.90 and M&Ms-1 > 0.85](docs/ACDC_ONLY_ROADMAP.md)
+- [Current strategy on the experimental branch](docs/CURRENT_STRATEGY.md)
 
 ---
 

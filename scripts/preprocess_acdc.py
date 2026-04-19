@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from src.data.acdc import acdc_train_val_split
 from src.data.transforms import get_preprocessing_transforms
-from src.topology.persistence import compute_topology_vector
+from src.topology.persistence import compute_topology_cache
 
 
 def _preprocess_sample(sample: dict, transform: Compose, topo_cfg: dict) -> dict:
@@ -35,18 +35,23 @@ def _preprocess_sample(sample: dict, transform: Compose, topo_cfg: dict) -> dict
     if getattr(label, "ndim", 0) == 3 and label.shape[0] == 1:
         label = label[0]
 
-    topo_vec = compute_topology_vector(
+    topo_cache = compute_topology_cache(
         processed["image"],
         max_dim=int(topo_cfg.get("max_dimension", 1)),
         threshold=float(topo_cfg.get("pd_threshold", 0.02)),
         downsample_size=int(topo_cfg.get("cache_downsample_size", 64)),
         top_k=int(topo_cfg.get("cache_top_k", 8)),
+        barcode_max_points=int(topo_cfg.get("barcode_max_points", 32)),
     )
 
     return {
         "image": np.asarray(processed["image"], dtype=np.float32),
         "label": np.asarray(label, dtype=np.int16),
-        "topo_vec": np.asarray(topo_vec, dtype=np.float32),
+        "topo_vec": np.asarray(topo_cache["topo_vec"], dtype=np.float32),
+        "barcode_h0": np.asarray(topo_cache["barcode_h0"], dtype=np.float32),
+        "barcode_h0_count": np.asarray(topo_cache["barcode_h0_count"], dtype=np.int32),
+        "barcode_h1": np.asarray(topo_cache["barcode_h1"], dtype=np.float32),
+        "barcode_h1_count": np.asarray(topo_cache["barcode_h1_count"], dtype=np.int32),
         "patient_id": sample.get("patient_id", ""),
         "phase": sample.get("phase", ""),
         "slice_idx": int(sample.get("slice_idx", -1)),
@@ -82,6 +87,10 @@ def _write_split(
             image=item["image"],
             label=item["label"],
             topo_vec=item["topo_vec"],
+            barcode_h0=item["barcode_h0"],
+            barcode_h0_count=item["barcode_h0_count"],
+            barcode_h1=item["barcode_h1"],
+            barcode_h1_count=item["barcode_h1_count"],
             patient_id=np.str_(item["patient_id"]),
             phase=np.str_(item["phase"]),
             slice_idx=np.int32(item["slice_idx"]),
@@ -95,6 +104,7 @@ def _write_split(
             "slice_idx": item["slice_idx"],
             "group": item["group"],
             "topo_dim": int(item["topo_vec"].shape[0]),
+            "barcode_max_points": int(item["barcode_h0"].shape[0]),
         })
 
     with open(split_dir / "index.json", "w", encoding="utf-8") as f:
@@ -143,6 +153,7 @@ def main():
         "topo_pd_threshold": float(topo_cfg.get("pd_threshold", 0.02)),
         "topo_cache_downsample_size": int(topo_cfg.get("cache_downsample_size", 64)),
         "topo_cache_top_k": int(topo_cfg.get("cache_top_k", 8)),
+        "topo_barcode_max_points": int(topo_cfg.get("barcode_max_points", 32)),
         "preprocessing_version": 1,
         "preprocessing": preprocess_cfg,
     }

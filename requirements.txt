@@ -16,10 +16,16 @@ SimpleITK>=2.3.0
 connected-components-3d>=3.12.0
 ripser>=0.6.4
 persim>=0.3.3
-pyrivet>=0.0.3
 medpy>=0.5.1
 scikit-image>=0.22.0
 pyyaml>=6.0
 tensorboard>=2.14.0
 torchmetrics>=1.2.0
 opendatasets
+
+# Optional experimental topology libraries
+torchph @ git+https://github.com/c-hofer/torchph.git
+# TopologyLayer is not used by the current branch yet and currently fails to
+# build on Python 3.12 / modern PyTorch macOS-arm64 toolchains.
+# Install it manually in a separate experimental environment if needed later.
+# TopologyLayer @ git+https://github.com/bruel-gabrielsson/TopologyLayer.git

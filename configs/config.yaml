@@ -84,8 +84,20 @@ topology:
   wasserstein_p: 1          # W1 distance
   cache_downsample_size: 64 # preprocessing resolution for cached topology vectors
   cache_top_k: 8            # top persistence values kept per homology dimension
+  barcode_max_points: 32    # cached birth-lifetime points per homology dimension
   topo_positive_top_k: 4    # use only the top-k topology neighbours as positives
   topo_positive_threshold: 0.6   # fallback threshold when top-k mining is disabled
+
+topology_experimental:
+  enabled: true
+  backend: "auto"           # "auto" -> use torchph if installed, else fallback SLayer
+  barcode_dims: [0, 1]
+  elements_per_dim: 16
+  embed_dim: 128            # match projection_dim for direct alignment
+  hidden_dim: 128
+  align_weight: 0.05
+  align_start_epoch: 20
+  confidence_gated: true
 
 loss:
   gamma: 0.1                # segmentation-first balance; keep contrastive as a mild auxiliary term
