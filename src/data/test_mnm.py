@@ -39,9 +39,6 @@ import torch
 from torch.utils.data import Dataset
 import logging
 
-from src.data.context import build_context_indices
-from src.data.preprocessing import harmonize_volume
-
 logger = logging.getLogger(__name__)
 
 
@@ -116,7 +113,6 @@ def _extract_2d_slices(
     out = []
     for s in range(frame_img.shape[2]):
         lbl_s = np.round(frame_lbl[:, :, s]).astype(np.int64)
-        lbl_s = _remap_mnm_labels_to_acdc(lbl_s)
         if lbl_s.max() == 0:          # no annotation on this slice
             continue
         img_s = frame_img[:, :, s]
@@ -132,25 +128,6 @@ def _extract_2d_slices(
             "split":      split,
         })
     return out
-
-
-def _remap_mnm_labels_to_acdc(label_slice: np.ndarray) -> np.ndarray:
-    """
-    Remap M&Ms label IDs into the ACDC convention used by the model/evaluator.
-
-    ACDC convention:
-      0 = BG, 1 = RV, 2 = Myo, 3 = LV
-
-    M&Ms convention:
-      0 = BG, 1 = LV, 2 = Myo, 3 = RV
-
-    This swap is essential for fair cross-dataset evaluation; without it,
-    anatomically correct LV/RV predictions are scored as wrong classes.
-    """
-    remapped = label_slice.copy()
-    remapped[label_slice == 1] = 3
-    remapped[label_slice == 3] = 1
-    return remapped
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -238,7 +215,6 @@ def collect_mnm1_slices(
     mnm1_root:  str,
     splits:     List[str] = ("Testing", "Validation"),
     require_gt: bool = True,
-    preprocess_cfg: Optional[Dict] = None,
 ) -> List[Dict]:
     """
     Load 2-D slices from M&Ms-1.
@@ -317,14 +293,8 @@ def collect_mnm1_slices(
                     if label_vol.ndim == 4
                     else label_vol
                 )
-                frame_img, frame_lbl, frame_spacing = harmonize_volume(
-                    frame_img,
-                    frame_lbl,
-                    spacing,
-                    preprocess_cfg,
-                )
                 slices = _extract_2d_slices(
-                    frame_img, frame_lbl, frame_spacing,
+                    frame_img, frame_lbl, spacing,
                     sid, phase, vendor, "MnM1", split_name,
                 )
                 all_slices.extend(slices)
@@ -415,10 +385,7 @@ def _vendor_mnm2(sid: str, df: Optional[pd.DataFrame]) -> str:
     return "Unknown"
 
 
-def collect_mnm2_slices(
-    mnm2_root: str,
-    preprocess_cfg: Optional[Dict] = None,
-) -> List[Dict]:
+def collect_mnm2_slices(mnm2_root: str) -> List[Dict]:
     """
     Load 2-D slices from M&Ms-2.
     Each subject contains pre-extracted 3-D ED and ES volumes.
@@ -465,14 +432,8 @@ def collect_mnm2_slices(
                 )
                 continue
 
-            volume, label_vol, volume_spacing = harmonize_volume(
-                volume,
-                label_vol,
-                spacing,
-                preprocess_cfg,
-            )
             slices = _extract_2d_slices(
-                volume, label_vol, volume_spacing,
+                volume, label_vol, spacing,
                 sid, phase, vendor, "MnM2", "dataset",
             )
             all_slices.extend(slices)
@@ -491,30 +452,18 @@ class DomainShiftDataset(Dataset):
     Drop-in compatible with ACDC SliceDataset.
     """
 
-    def __init__(
-        self,
-        slices: List[Dict],
-        transforms=None,
-        context_slices: int = 1,
-    ):
+    def __init__(self, slices: List[Dict], transforms=None):
         self.slices     = slices
         self.transforms = transforms
-        self.context_slices = int(context_slices)
-        self.context_indices = build_context_indices(self.slices, self.context_slices)
 
     def __len__(self) -> int:
         return len(self.slices)
 
     def __getitem__(self, idx: int) -> Dict:
         raw = self.slices[idx]
-        ctx_indices = self.context_indices[idx]
-        image_stack = np.concatenate(
-            [self.slices[j]["image"] for j in ctx_indices],
-            axis=0,
-        ).astype(np.float32, copy=False)
 
         sample = {
-            "image":      image_stack.copy(),
+            "image":      raw["image"].copy(),
             "label":      raw["label"][np.newaxis].copy(),
             "patient_id": raw.get("patient_id", ""),
             "phase":      raw.get("phase", ""),

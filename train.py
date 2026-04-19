@@ -14,6 +14,7 @@ TensorBoard logs are written to:
 """
 import argparse
 import copy
+import json
 import logging
 import os
 import random
@@ -103,7 +104,9 @@ def main():
 
     # ── Data ────────────────────────────────────────────────────────────────
     data_cfg = cfg["data"]
+    preprocess_cfg = cfg.get("preprocessing", {})
     spatial_size = tuple(data_cfg["spatial_size"])   # (H, W)
+    context_slices = int(data_cfg.get("context_slices", data_cfg.get("in_channels", 1)))
 
     use_preprocessed = bool(data_cfg.get("use_preprocessed_acdc", False))
     preprocessed_root = cfg["paths"].get(
@@ -120,15 +123,31 @@ def main():
 
     if use_preprocessed:
         logger.info(f"Loading preprocessed ACDC dataset from {preprocessed_root}…")
+        meta_path = os.path.join(preprocessed_root, "meta.json")
+        if preprocess_cfg.get("enabled", False):
+            if not os.path.exists(meta_path):
+                raise RuntimeError(
+                    "Phase-1 preprocessing is enabled but preprocessed ACDC cache is "
+                    "missing meta.json. Rebuild with scripts/preprocess_acdc.py."
+                )
+            with open(meta_path, "r", encoding="utf-8") as f:
+                cache_meta = json.load(f)
+            if int(cache_meta.get("preprocessing_version", 0)) < 1:
+                raise RuntimeError(
+                    "Preprocessed ACDC cache was built before Phase-1 harmonization. "
+                    "Rebuild with scripts/preprocess_acdc.py --overwrite."
+                )
         train_transforms = get_train_transforms_for_preprocessed(cfg.get("augmentation", {}))
         val_transforms = get_val_transforms_for_preprocessed()
         train_dataset = PreprocessedSliceDataset(
             os.path.join(preprocessed_root, "train"),
             transforms=train_transforms,
+            context_slices=context_slices,
         )
         val_dataset = PreprocessedSliceDataset(
             os.path.join(preprocessed_root, "val"),
             transforms=val_transforms,
+            context_slices=context_slices,
         )
     else:
         logger.info("Loading ACDC dataset…")
@@ -136,13 +155,26 @@ def main():
             acdc_root  = cfg["paths"]["acdc_root"],
             val_ratio  = data_cfg.get("acdc_val_ratio", 0.20),
             seed       = cfg.get("seed", 42),
+            preprocess_cfg = preprocess_cfg,
         )
 
-        train_transforms = get_train_transforms(spatial_size, cfg.get("augmentation", {}))
-        val_transforms   = get_val_transforms(spatial_size)
+        train_transforms = get_train_transforms(
+            spatial_size,
+            cfg.get("augmentation", {}),
+            preprocess_cfg=preprocess_cfg,
+        )
+        val_transforms   = get_val_transforms(spatial_size, preprocess_cfg=preprocess_cfg)
 
-        train_dataset = SliceDataset(train_slices, transforms=train_transforms)
-        val_dataset   = SliceDataset(val_slices,   transforms=val_transforms)
+        train_dataset = SliceDataset(
+            train_slices,
+            transforms=train_transforms,
+            context_slices=context_slices,
+        )
+        val_dataset   = SliceDataset(
+            val_slices,
+            transforms=val_transforms,
+            context_slices=context_slices,
+        )
 
     train_cfg = copy.deepcopy(cfg["training"])
     train_cfg["batch_size"] = runtime_settings["train_batch_size"]

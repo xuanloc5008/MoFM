@@ -93,7 +93,7 @@ class TopoEvidentialUMamba(nn.Module):
         return_projections: bool = True,
     ) -> Dict[str, torch.Tensor]:
         """
-        x : (B, 1, H, W)  normalised 2-D cardiac MRI slice
+        x : (B, C, H, W)  normalised 2-D or 2.5-D cardiac MRI input
         """
         # ── Shared trunk ─────────────────────────────────────────────────
         v_i, dense_feat = self.backbone(x)    # bottleneck + decoded features
@@ -143,9 +143,10 @@ def build_model(cfg: dict) -> "TopoEvidentialUMamba":
     """Build model from config dict."""
     model_cfg = cfg.get("model", {})
     data_cfg  = cfg.get("data",  {})
+    context_slices = int(data_cfg.get("context_slices", data_cfg.get("in_channels", 1)))
 
     return TopoEvidentialUMamba(
-        in_channels      = data_cfg.get("in_channels",    1),
+        in_channels      = context_slices,
         num_classes      = data_cfg.get("num_classes",    4),
         feature_channels = model_cfg.get("feature_channels", [32, 64, 128, 256, 512]),
         d_state          = model_cfg.get("ssm_d_state",   16),

@@ -14,12 +14,12 @@ paths:
   #   M&M1/211230_M&M...csv
   #   MnM2/dataset/{ID}/{ID}_SA_ED.nii.gz
   #   MnM2/dataset_information.csv
-  acdc_root:   "/workspace/MoFM/dataset/acdcdata/ACDC/database"   # → data/ACDC-dataset/database/training/
+  acdc_root:   "/Volumes/Transcend/ACDC-dataset/database"   # → data/ACDC-dataset/database/training/
   mnm1_root:   "/Volumes/Transcend/M&M1"           # → data/M&M1/Testing/, Validation/, Training/Labeled/
   mnm2_root:   "/Volumes/Transcend/MnM2"           # → data/MnM2/dataset/027/027_SA_ED.nii.gz
   output_dir:  "outputs"
   preprocessed_acdc_root: "outputs/preprocessed/acdc"
-  checkpoint_dir: "outputs/checkpoints"
+  checkpoint_dir: "/Users/xuanloc/Documents/topo_evidential_umamba/outputs/checkpoints"
   log_dir:     "outputs/logs"
   figure_dir:  "outputs/figures"
 
@@ -27,11 +27,21 @@ data:
   num_classes: 4          # 0=BG, 1=RV, 2=Myo, 3=LV
   class_names: ["BG", "RV", "Myo", "LV"]
   spatial_size: [224, 224]   # 2-D slice size after crop/pad
-  in_channels: 1
+  in_channels: 3
+  context_slices: 3        # Phase 2: 2.5D input = [prev, center, next]
   # ACDC split: 100 patients → 80 train / 20 val
   acdc_val_ratio: 0.20
   use_preprocessed_acdc: true
   cache_rate: 0.5            # MONAI cache fraction
+
+preprocessing:
+  enabled: true
+  target_spacing_xy: [1.25, 1.25]  # harmonize in-plane resolution across ACDC / M&Ms
+  crop_to_nonzero: true            # remove obvious zero-padding before final crop/pad
+  crop_margin: 12
+  volume_clip_percentiles: [0.5, 99.5]
+  volume_normalize: true           # normalize per phase volume, not per independent slice
+  normalize_nonzero_only: true
 
 augmentation:
   rand_rotate_prob: 0.75

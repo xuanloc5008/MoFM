@@ -65,13 +65,24 @@ def get_spatial_resizer(spatial_size: Tuple[int, int] = (224, 224)) -> Compose:
 
 def get_preprocessing_transforms(
     spatial_size: Tuple[int, int] = (224, 224),
+    preprocess_cfg: Dict = None,
 ) -> list:
-    return [
-        ScaleIntensityRangePercentilesd(
-            keys=["image"], lower=0.5, upper=99.5,
-            b_min=0.0, b_max=1.0, clip=True,
-        ),
-        NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+    preprocess_cfg = preprocess_cfg or {}
+    transforms = []
+
+    # When loader-level harmonization is enabled, resampling and volume
+    # normalization already happened before slices reach MONAI. We only keep
+    # deterministic crop/pad here.
+    if not preprocess_cfg.get("enabled", False):
+        transforms.extend([
+            ScaleIntensityRangePercentilesd(
+                keys=["image"], lower=0.5, upper=99.5,
+                b_min=0.0, b_max=1.0, clip=True,
+            ),
+            NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+        ])
+
+    transforms.extend([
         SpatialPadd(
             keys=["image", "label"],
             spatial_size=spatial_size,
@@ -79,7 +90,8 @@ def get_preprocessing_transforms(
             mode="constant",
         ),
         CenterSpatialCropd(keys=["image", "label"], roi_size=spatial_size),
-    ]
+    ])
+    return transforms
 
 
 def get_tensor_transforms() -> list:
@@ -167,13 +179,14 @@ def get_train_augmentation_transforms(cfg: Dict = None) -> list:
 def get_train_transforms(
     spatial_size: Tuple[int, int] = (224, 224),
     cfg: Dict = None,
+    preprocess_cfg: Dict = None,
 ) -> Compose:
     """
     Full training pipeline:
       preprocessing → augmentation → tensor conversion
     """
     return Compose([
-        *get_preprocessing_transforms(spatial_size),
+        *get_preprocessing_transforms(spatial_size, preprocess_cfg=preprocess_cfg),
         *get_train_augmentation_transforms(cfg),
         *get_tensor_transforms(),
     ])
@@ -189,10 +202,11 @@ def get_train_transforms_for_preprocessed(cfg: Dict = None) -> Compose:
 
 def get_val_transforms(
     spatial_size: Tuple[int, int] = (224, 224),
+    preprocess_cfg: Dict = None,
 ) -> Compose:
     """Validation / test pipeline: only preprocessing, no augmentation."""
     return Compose([
-        *get_preprocessing_transforms(spatial_size),
+        *get_preprocessing_transforms(spatial_size, preprocess_cfg=preprocess_cfg),
         *get_tensor_transforms(),
     ])
 
@@ -206,17 +220,24 @@ def get_val_transforms_for_preprocessed() -> Compose:
 
 def get_inference_transforms(
     spatial_size: Tuple[int, int] = (224, 224),
+    preprocess_cfg: Dict = None,
 ) -> Compose:
     """Inference pipeline – no label key."""
-    return Compose([
-        ScaleIntensityRangePercentilesd(
-            keys=["image"], lower=0.5, upper=99.5,
-            b_min=0.0, b_max=1.0, clip=True,
-        ),
-        NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+    preprocess_cfg = preprocess_cfg or {}
+    transforms = []
+    if not preprocess_cfg.get("enabled", False):
+        transforms.extend([
+            ScaleIntensityRangePercentilesd(
+                keys=["image"], lower=0.5, upper=99.5,
+                b_min=0.0, b_max=1.0, clip=True,
+            ),
+            NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+        ])
+    transforms.extend([
         SpatialPadd(keys=["image"], spatial_size=spatial_size,
                     method="symmetric", mode="constant"),
         CenterSpatialCropd(keys=["image"], roi_size=spatial_size),
         CastToTyped(keys=["image"], dtype=torch.float32),
         EnsureTyped(keys=["image"], track_meta=False),
     ])
+    return Compose(transforms)

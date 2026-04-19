@@ -18,6 +18,9 @@ from torch.utils.data import Dataset
 from monai.transforms import Compose
 import logging
 
+from src.data.context import build_context_indices
+from src.data.preprocessing import harmonize_volume
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,9 +94,10 @@ def load_nifti_as_numpy(path: str) -> Tuple[np.ndarray, np.ndarray]:
 class ACDCPatient:
     """Container for one ACDC patient's ED/ES volumes + labels."""
 
-    def __init__(self, patient_dir: str):
+    def __init__(self, patient_dir: str, preprocess_cfg: Optional[Dict] = None):
         self.patient_dir = Path(patient_dir)
         self.patient_id  = self.patient_dir.name
+        self.preprocess_cfg = preprocess_cfg or {}
 
         info_file = self.patient_dir / "Info.cfg"
         if not info_file.exists():
@@ -120,6 +124,23 @@ class ACDCPatient:
         self.ed_label, _ = load_nifti_as_numpy(str(ed_gt))
         self.es_image, _ = load_nifti_as_numpy(str(es_img))
         self.es_label, _ = load_nifti_as_numpy(str(es_gt))
+
+        self.ed_image, self.ed_label, ed_spacing = harmonize_volume(
+            self.ed_image,
+            self.ed_label,
+            self.voxel_spacing,
+            self.preprocess_cfg,
+        )
+        self.es_image, self.es_label, es_spacing = harmonize_volume(
+            self.es_image,
+            self.es_label,
+            self.voxel_spacing,
+            self.preprocess_cfg,
+        )
+
+        # ED and ES should share the same in-plane spacing after harmonization.
+        self.voxel_spacing = np.asarray(ed_spacing, dtype=np.float32)
+        self.es_voxel_spacing = np.asarray(es_spacing, dtype=np.float32)
 
         # Round labels to int
         self.ed_label = np.round(self.ed_label).astype(np.int64)
@@ -149,7 +170,11 @@ class ACDCPatient:
         return slices
 
 
-def collect_acdc_slices(acdc_root: str, split: str = "training") -> List[Dict]:
+def collect_acdc_slices(
+    acdc_root: str,
+    split: str = "training",
+    preprocess_cfg: Optional[Dict] = None,
+) -> List[Dict]:
     """
     Walk ACDC directory and collect all 2-D slices.
     split: 'training' | 'testing'
@@ -164,7 +189,7 @@ def collect_acdc_slices(acdc_root: str, split: str = "training") -> List[Dict]:
     )
     for pdir in patient_dirs:
         try:
-            patient = ACDCPatient(str(pdir))
+            patient = ACDCPatient(str(pdir), preprocess_cfg=preprocess_cfg)
             all_slices.extend(patient.get_2d_slices())
         except Exception as e:
             logger.warning(f"Skip {pdir.name}: {e}")
@@ -176,6 +201,7 @@ def acdc_train_val_split(
     acdc_root: str,
     val_ratio: float = 0.20,
     seed: int = 42,
+    preprocess_cfg: Optional[Dict] = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Patient-level split to avoid data leakage.
@@ -210,7 +236,7 @@ def acdc_train_val_split(
         slices = []
         for pdir in dirs:
             try:
-                patient = ACDCPatient(str(pdir))
+                patient = ACDCPatient(str(pdir), preprocess_cfg=preprocess_cfg)
                 slices.extend(patient.get_2d_slices())
             except Exception as e:
                 logger.warning(f"Skip {pdir.name}: {e}")
@@ -234,19 +260,31 @@ class SliceDataset(Dataset):
     transforms that expect numpy input.
     """
 
-    def __init__(self, slices: List[Dict], transforms: Optional[Compose] = None):
+    def __init__(
+        self,
+        slices: List[Dict],
+        transforms: Optional[Compose] = None,
+        context_slices: int = 1,
+    ):
         self.slices     = slices
         self.transforms = transforms
+        self.context_slices = int(context_slices)
+        self.context_indices = build_context_indices(self.slices, self.context_slices)
 
     def __len__(self) -> int:
         return len(self.slices)
 
     def __getitem__(self, idx: int) -> Dict:
         raw = self.slices[idx]
+        ctx_indices = self.context_indices[idx]
+        image_stack = np.concatenate(
+            [self.slices[j]["image"] for j in ctx_indices],
+            axis=0,
+        ).astype(np.float32, copy=False)
 
         # Shallow copy; keep numpy arrays for MONAI transform compatibility
         sample = {
-            "image":      raw["image"].copy(),   # numpy (1, H, W) float32
+            "image":      image_stack.copy(),   # numpy (C, H, W) float32
             "label":      raw["label"][np.newaxis].copy(),   # numpy (1, H, W) int64
             "patient_id": raw.get("patient_id", ""),
             "phase":      raw.get("phase", ""),
@@ -290,9 +328,15 @@ class PreprocessedSliceDataset(Dataset):
     online augmentation and tensor conversion.
     """
 
-    def __init__(self, root_dir: str, transforms: Optional[Compose] = None):
+    def __init__(
+        self,
+        root_dir: str,
+        transforms: Optional[Compose] = None,
+        context_slices: int = 1,
+    ):
         self.root_dir = Path(root_dir)
         self.transforms = transforms
+        self.context_slices = int(context_slices)
 
         if not self.root_dir.exists():
             raise FileNotFoundError(f"Preprocessed slice directory not found: {self.root_dir}")
@@ -302,8 +346,19 @@ class PreprocessedSliceDataset(Dataset):
             with open(index_path, "r", encoding="utf-8") as f:
                 index = json.load(f)
             self.files = [self.root_dir / item["file"] for item in index]
+            self.records = index
         else:
             self.files = sorted(self.root_dir.glob("*.npz"))
+            self.records = []
+            for file in self.files:
+                with np.load(file, allow_pickle=False) as raw:
+                    self.records.append({
+                        "file": file.name,
+                        "patient_id": str(raw["patient_id"]),
+                        "phase": str(raw["phase"]),
+                        "slice_idx": int(raw["slice_idx"]),
+                        "group": str(raw["group"]),
+                    })
 
         if not self.files:
             raise FileNotFoundError(f"No preprocessed .npz files found in {self.root_dir}")
@@ -314,23 +369,42 @@ class PreprocessedSliceDataset(Dataset):
                     f"Preprocessed file {self.files[0]} is missing 'topo_vec'. "
                     "Rebuild the cache with scripts/preprocess_acdc.py."
                 )
+        self.context_indices = build_context_indices(self.records, self.context_slices)
 
     def __len__(self) -> int:
         return len(self.files)
 
     def __getitem__(self, idx: int) -> Dict:
-        with np.load(self.files[idx], allow_pickle=False) as raw:
-            sample = {
-                "image": raw["image"].copy(),
-                "label": raw["label"][np.newaxis].copy(),
-                "patient_id": str(raw["patient_id"]),
-                "phase": str(raw["phase"]),
-                "slice_idx": int(raw["slice_idx"]),
-                "spacing": raw["spacing"].astype(np.float32, copy=True),
-                "group": str(raw["group"]),
-            }
-            if "topo_vec" in raw:
-                sample["topo_vec"] = raw["topo_vec"].astype(np.float32, copy=True)
+        ctx_indices = self.context_indices[idx]
+        images = []
+        center_raw = None
+        for j in ctx_indices:
+            with np.load(self.files[j], allow_pickle=False) as raw:
+                images.append(raw["image"].astype(np.float32, copy=True))
+                if j == idx:
+                    center_raw = {
+                        "label": raw["label"][np.newaxis].copy(),
+                        "patient_id": str(raw["patient_id"]),
+                        "phase": str(raw["phase"]),
+                        "slice_idx": int(raw["slice_idx"]),
+                        "spacing": raw["spacing"].astype(np.float32, copy=True),
+                        "group": str(raw["group"]),
+                        "topo_vec": raw["topo_vec"].astype(np.float32, copy=True),
+                    }
+
+        if center_raw is None:
+            raise RuntimeError(f"Failed to load center slice for index {idx}")
+
+        sample = {
+            "image": np.concatenate(images, axis=0),
+            "label": center_raw["label"],
+            "patient_id": center_raw["patient_id"],
+            "phase": center_raw["phase"],
+            "slice_idx": center_raw["slice_idx"],
+            "spacing": center_raw["spacing"],
+            "group": center_raw["group"],
+            "topo_vec": center_raw["topo_vec"],
+        }
 
         if self.transforms is not None:
             sample = self.transforms(sample)

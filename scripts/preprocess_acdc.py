@@ -119,13 +119,15 @@ def main():
     output_root.mkdir(parents=True, exist_ok=True)
 
     spatial_size = tuple(cfg["data"]["spatial_size"])
-    transform = Compose(get_preprocessing_transforms(spatial_size))
+    preprocess_cfg = cfg.get("preprocessing", {})
+    transform = Compose(get_preprocessing_transforms(spatial_size, preprocess_cfg=preprocess_cfg))
     topo_cfg = cfg.get("topology", {})
 
     train_slices, val_slices = acdc_train_val_split(
         acdc_root=cfg["paths"]["acdc_root"],
         val_ratio=cfg["data"].get("acdc_val_ratio", 0.20),
         seed=cfg.get("seed", 42),
+        preprocess_cfg=preprocess_cfg,
     )
 
     _write_split("train", train_slices, output_root, transform, topo_cfg, overwrite=args.overwrite)
@@ -141,6 +143,8 @@ def main():
         "topo_pd_threshold": float(topo_cfg.get("pd_threshold", 0.02)),
         "topo_cache_downsample_size": int(topo_cfg.get("cache_downsample_size", 64)),
         "topo_cache_top_k": int(topo_cfg.get("cache_top_k", 8)),
+        "preprocessing_version": 1,
+        "preprocessing": preprocess_cfg,
     }
     with open(output_root / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
