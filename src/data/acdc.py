@@ -253,6 +253,9 @@ class SliceDataset(Dataset):
             "slice_idx":  raw.get("slice_idx", -1),
             "spacing":    raw.get("spacing", np.array([1.5, 1.5, 8.0], dtype=np.float32)),
             "group":      raw.get("group", ""),
+            "dataset":    raw.get("dataset", ""),
+            "vendor":     raw.get("vendor", "Unknown"),
+            "split":      raw.get("split", ""),
         }
         if "topo_vec" in raw:
             sample["topo_vec"] = np.asarray(raw["topo_vec"], dtype=np.float32).copy()
@@ -320,6 +323,7 @@ class PreprocessedSliceDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict:
         with np.load(self.files[idx], allow_pickle=False) as raw:
+            keys = set(raw.files)
             sample = {
                 "image": raw["image"].copy(),
                 "label": raw["label"][np.newaxis].copy(),
@@ -327,7 +331,10 @@ class PreprocessedSliceDataset(Dataset):
                 "phase": str(raw["phase"]),
                 "slice_idx": int(raw["slice_idx"]),
                 "spacing": raw["spacing"].astype(np.float32, copy=True),
-                "group": str(raw["group"]),
+                "group": str(raw["group"]) if "group" in keys else "",
+                "dataset": str(raw["dataset"]) if "dataset" in keys else "",
+                "vendor": str(raw["vendor"]) if "vendor" in keys else "Unknown",
+                "split": str(raw["split"]) if "split" in keys else "",
             }
             if "topo_vec" in raw:
                 sample["topo_vec"] = raw["topo_vec"].astype(np.float32, copy=True)

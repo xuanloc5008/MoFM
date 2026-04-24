@@ -112,11 +112,14 @@ Pipeline hoàn chỉnh trên dữ liệu tổng hợp:
 
 ---
 
-## Training trên ACDC
+## Training M&Ms-1 + M&Ms-2, Validation ngoài trên ACDC
 
 ```bash
 # Chỉnh đường dẫn trong configs/config.yaml:
-# paths.acdc_root: "data/ACDC-dataset"
+# paths.mnm1_root, paths.mnm2_root, paths.acdc_root
+# data.acdc_external_split đang để "training"; đổi sang "testing" nếu có GT test.
+
+python scripts/preprocess_cardiac.py --config configs/config.yaml --overwrite
 
 python train.py --config configs/config.yaml --gpu 0
 ```

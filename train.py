@@ -1,7 +1,9 @@
 """
 train.py
 ---------
-Entry point for training Topo-Evidential U-Mamba on ACDC.
+Entry point for training Topo-Evidential U-Mamba.
+
+Default config trains on M&Ms-1 + M&Ms-2 and validates externally on ACDC.
 
 Usage:
   python train.py --config configs/config.yaml
@@ -29,7 +31,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 from src.data.acdc        import (
     PreprocessedSliceDataset,
     SliceDataset,
-    acdc_train_val_split,
+)
+from src.data.sources     import (
+    collect_configured_slices,
+    get_preprocessed_root,
+    summarize_slices,
 )
 from src.data.transforms  import (
     get_train_transforms,
@@ -105,38 +111,36 @@ def main():
     data_cfg = cfg["data"]
     spatial_size = tuple(data_cfg["spatial_size"])   # (H, W)
 
-    use_preprocessed = bool(data_cfg.get("use_preprocessed_acdc", False))
-    preprocessed_root = cfg["paths"].get(
-        "preprocessed_acdc_root",
-        os.path.join(output_dir, "preprocessed", "acdc"),
+    use_preprocessed = bool(
+        data_cfg.get("use_preprocessed", data_cfg.get("use_preprocessed_acdc", False))
     )
+    preprocessed_root = get_preprocessed_root(cfg)
     contrastive_enabled = float(cfg.get("loss", {}).get("gamma", 0.0)) > 0.0
 
     if contrastive_enabled and not use_preprocessed:
         raise RuntimeError(
             "Contrastive topology training now expects cached 'topo_vec' features. "
-            "Run scripts/preprocess_acdc.py, then set data.use_preprocessed_acdc=true."
+            "Run scripts/preprocess_cardiac.py, then set data.use_preprocessed=true."
         )
 
     if use_preprocessed:
-        logger.info(f"Loading preprocessed ACDC dataset from {preprocessed_root}…")
+        logger.info(f"Loading preprocessed configured dataset from {preprocessed_root}…")
         train_transforms = get_train_transforms_for_preprocessed(cfg.get("augmentation", {}))
         val_transforms = get_val_transforms_for_preprocessed()
         train_dataset = PreprocessedSliceDataset(
-            os.path.join(preprocessed_root, "train"),
+            os.path.join(str(preprocessed_root), "train"),
             transforms=train_transforms,
         )
         val_dataset = PreprocessedSliceDataset(
-            os.path.join(preprocessed_root, "val"),
+            os.path.join(str(preprocessed_root), "val"),
             transforms=val_transforms,
         )
     else:
-        logger.info("Loading ACDC dataset…")
-        train_slices, val_slices = acdc_train_val_split(
-            acdc_root  = cfg["paths"]["acdc_root"],
-            val_ratio  = data_cfg.get("acdc_val_ratio", 0.20),
-            seed       = cfg.get("seed", 42),
-        )
+        logger.info("Loading configured raw datasets…")
+        train_slices, val_slices, source_meta = collect_configured_slices(cfg)
+        logger.info(f"Source setup: {source_meta}")
+        logger.info(f"Train slice summary: {summarize_slices(train_slices)}")
+        logger.info(f"Val slice summary: {summarize_slices(val_slices)}")
 
         train_transforms = get_train_transforms(spatial_size, cfg.get("augmentation", {}))
         val_transforms   = get_val_transforms(spatial_size)

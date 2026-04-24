@@ -16,7 +16,6 @@ SimpleITK>=2.3.0
 connected-components-3d>=3.12.0
 ripser>=0.6.4
 persim>=0.3.3
-pyrivet>=0.0.3
 medpy>=0.5.1
 scikit-image>=0.22.0
 pyyaml>=6.0

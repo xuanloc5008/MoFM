@@ -192,13 +192,14 @@ class Trainer:
             images = batch["image"].to(self.device, non_blocking=self.non_blocking)
             labels = batch["label"].to(self.device, non_blocking=self.non_blocking)
             topo_vec = batch.get("topo_vec")
-            if topo_vec is None:
+            if topo_vec is None and self.gamma > 0.0:
                 raise RuntimeError(
-                    "Missing 'topo_vec' in training batch. Rebuild the preprocessed "
-                    "dataset with scripts/preprocess_acdc.py and train with "
-                    "data.use_preprocessed_acdc=true."
+                    "Missing 'topo_vec' in training batch. Rebuild the configured "
+                    "preprocessed dataset with scripts/preprocess_cardiac.py and "
+                    "train with data.use_preprocessed=true."
                 )
-            topo_vec = topo_vec.to(self.device, non_blocking=self.non_blocking)
+            if topo_vec is not None:
+                topo_vec = topo_vec.to(self.device, non_blocking=self.non_blocking)
 
             with self._autocast_context():
                 # ── Forward ──────────────────────────────────────────────
@@ -221,7 +222,11 @@ class Trainer:
                 )
 
                 # ── L_PD-SCon (weight 0.05; was 0.1) ─────────────────────
-                l_con = self.con_loss(projections, topo_vec)
+                l_con = (
+                    self.con_loss(projections, topo_vec)
+                    if self.gamma > 0.0 and topo_vec is not None
+                    else projections.sum() * 0.0
+                )
 
                 # ── L_dist: topology-anchor distribution (NEW) ───────────
                 # Detach z_topo for the dist loss so its gradient only flows
@@ -352,30 +357,25 @@ class Trainer:
 
             # Logging
             elapsed = time.time() - t0
-            log_msg = (
+            logger.info(
                 f"Epoch {epoch+1:3d}/{self.epochs} | "
                 f"Loss: {train_metrics['total']:.4f} "
-                f"(EDL: {train_metrics['edl']:.4f}, Dice: {train_metrics['dice']:.4f}, "
-                f"Con: {train_metrics['con']:.4f}, Dist: {train_metrics['dist']:.4f}) | "
-                f"Best Loss: {self.best_train_metrics['total']:.4f} "
-                f"(EDL: {self.best_train_metrics['edl']:.4f}, "
-                f"Dice: {self.best_train_metrics['dice']:.4f}, "
-                f"Con: {self.best_train_metrics['con']:.4f}, "
-                f"Dist: {self.best_train_metrics['dist']:.4f}) | "
-                f"LR: {lr:.2e} | {elapsed:.1f}s"
+                f"(EDL:{train_metrics['edl']:.4f} Dice:{train_metrics['dice']:.4f} "
+                f"Con:{train_metrics['con']:.4f} Dist:{train_metrics['dist']:.4f}) | "
+                f"LR:{lr:.2e} | {elapsed:.1f}s"
             )
             if val_metrics:
-                log_msg += (
-                    f" | Dice: {val_metrics.get('val_dice_mean', 0):.4f} "
-                    f"(RV:{val_metrics.get('val_dice_rv',0):.3f} "
-                    f"Myo:{val_metrics.get('val_dice_myo',0):.3f} "
-                    f"LV:{val_metrics.get('val_dice_lv',0):.3f})"
-                    f" | Best Dice: {self.best_val_metrics['val_dice_mean']:.4f} "
-                    f"(RV:{self.best_val_metrics['val_dice_rv']:.3f} "
-                    f"Myo:{self.best_val_metrics['val_dice_myo']:.3f} "
-                    f"LV:{self.best_val_metrics['val_dice_lv']:.3f})"
+                best_marker = " ★" if val_metrics.get("val_dice_mean", 0) >= self.best_val_dice else ""
+                logger.info(
+                    f"  Val  Dice  mean={val_metrics.get('val_dice_mean', 0):.4f}{best_marker}"
+                    f"  RV={val_metrics.get('val_dice_rv', 0):.4f}"
+                    f"  Myo={val_metrics.get('val_dice_myo', 0):.4f}"
+                    f"  LV={val_metrics.get('val_dice_lv', 0):.4f}"
+                    f"  │  best mean={self.best_val_metrics['val_dice_mean']:.4f}"
+                    f"  RV={self.best_val_metrics['val_dice_rv']:.4f}"
+                    f"  Myo={self.best_val_metrics['val_dice_myo']:.4f}"
+                    f"  LV={self.best_val_metrics['val_dice_lv']:.4f}"
                 )
-            logger.info(log_msg)
 
             # TensorBoard
             self.writer.add_scalar("Train/Loss_Total",       train_metrics["total"], epoch)

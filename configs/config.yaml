@@ -18,6 +18,7 @@ paths:
   mnm1_root:   "/Volumes/Transcend/M&M1"           # → data/M&M1/Testing/, Validation/, Training/Labeled/
   mnm2_root:   "/Volumes/Transcend/MnM2"           # → data/MnM2/dataset/027/027_SA_ED.nii.gz
   output_dir:  "outputs"
+  preprocessed_root: "outputs/preprocessed/mnm1_mnm2_train_acdc_external"
   preprocessed_acdc_root: "outputs/preprocessed/acdc"
   checkpoint_dir: "outputs/checkpoints"
   log_dir:     "outputs/logs"
@@ -28,9 +29,19 @@ data:
   class_names: ["BG", "RV", "Myo", "LV"]
   spatial_size: [224, 224]   # 2-D slice size after crop/pad
   in_channels: 1
-  # ACDC split: 100 patients → 80 train / 20 val
+  # Multi-vendor training setup:
+  #   train = M&Ms-1 labeled training/validation + all M&Ms-2 labeled subjects
+  #   val   = ACDC external validation split below
+  train_datasets: ["mnm1", "mnm2"]
+  validation_dataset: "acdc"
+  mnm1_train_splits: ["Training", "Validation"]
+  # Use "training" by default because official ACDC testing labels are often unavailable.
+  # Switch to "testing" here if your local ACDC test split includes *_gt.nii.gz labels.
+  acdc_external_split: "training"
+  use_preprocessed: true
+  # Legacy ACDC-only split/cache flags are kept for backwards compatibility.
   acdc_val_ratio: 0.20
-  use_preprocessed_acdc: true
+  use_preprocessed_acdc: false
   cache_rate: 0.5            # MONAI cache fraction
 
 augmentation:
