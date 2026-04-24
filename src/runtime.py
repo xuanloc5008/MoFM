@@ -63,6 +63,25 @@ _BUILTIN_RUNTIME_PROFILES: Dict[str, Dict] = {
         "num_workers": 8,
         "prefetch_factor": 4,
     },
+    "cuda_v100": {
+        # Volta/V100 has fast FP16 tensor cores, but no native BF16/TF32.
+        "train_batch_size": 8,
+        "val_batch_size": 16,
+        "num_workers": 8,
+        "prefetch_factor": 4,
+        "amp_dtype": "float16",
+        "allow_tf32": False,
+    },
+    "cuda_5090": {
+        # RTX 5090-class 32GB cards have strong BF16/TF32 throughput, but less
+        # memory than L40-class 48GB cards.
+        "train_batch_size": 16,
+        "val_batch_size": 32,
+        "num_workers": 12,
+        "prefetch_factor": 6,
+        "amp_dtype": "bfloat16",
+        "allow_tf32": True,
+    },
 }
 
 _AMP_DTYPES = {
@@ -149,6 +168,10 @@ def resolve_runtime_profile_names(device: torch.device, gpu_index: int = 0) -> L
         device_name = get_device_name(device, gpu_index).upper()
         if "L40" in device_name:
             names.append("cuda_l40")
+        if "V100" in device_name:
+            names.append("cuda_v100")
+        if "5090" in device_name:
+            names.append("cuda_5090")
     return names
 
 
