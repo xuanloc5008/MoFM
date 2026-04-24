@@ -88,7 +88,18 @@ class UMambaDecoder(nn.Module):
     """
     Multi-scale decoder.
     Takes bottleneck v_i + encoder skips → dense feature map.
+
+    Optionally injects anchor conditioning at D3 (the second decoder step,
+    ups[1]) via a cross-attention block that is set externally after
+    construction (self.cross_attn_d3 = <CrossAttentionD3 instance>).
     """
+
+    # Index of the UpBlock whose output we call "D3" and condition on.
+    # ups[0] : bottleneck → 256 ch  (D4)
+    # ups[1] : 256 → 128 ch         (D3) ← inject here
+    # ups[2] : 128 → 64 ch          (D2)
+    # ups[3] : 64  → 32 ch          (D1 / output)
+    D3_IDX: int = 1
 
     def __init__(
         self,
@@ -107,14 +118,25 @@ class UMambaDecoder(nn.Module):
             out_ch  = channels[i - 1]
             self.ups.append(UpBlock(in_ch, skip_ch, out_ch, d_state, expand, dropout))
 
+        # Set externally by TopoEvidentialUMamba after construction
+        self.cross_attn_d3 = None
+
     def forward(
         self,
-        v_i:   torch.Tensor,         # bottleneck
-        skips: List[torch.Tensor],   # from encoder (fine→coarse order after reverse)
+        v_i:           torch.Tensor,               # bottleneck
+        skips:         List[torch.Tensor],          # encoder skips, fine→coarse
+        anchor_tokens: torch.Tensor | None = None,  # (B, 3, d_token) or None
     ) -> torch.Tensor:
         x = v_i
-        for up, skip in zip(self.ups, reversed(skips)):
+        for i, (up, skip) in enumerate(zip(self.ups, reversed(skips))):
             x = up(x, skip)
+            # D3 injection: apply cross-attention when anchor tokens are provided
+            if (
+                i == self.D3_IDX
+                and self.cross_attn_d3 is not None
+                and anchor_tokens is not None
+            ):
+                x = self.cross_attn_d3(x, anchor_tokens)
         return x
 
 
@@ -141,7 +163,11 @@ class UMamba(nn.Module):
         self.out_channels    = feature_channels[0]
         self.bottleneck_ch   = feature_channels[-1]
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        v_i, skips     = self.encoder(x)
-        dense_feat     = self.decoder(v_i, skips)
+    def forward(
+        self,
+        x:             torch.Tensor,
+        anchor_tokens: torch.Tensor | None = None,  # (B, 3, d_token) or None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        v_i, skips = self.encoder(x)
+        dense_feat = self.decoder(v_i, skips, anchor_tokens=anchor_tokens)
         return v_i, dense_feat

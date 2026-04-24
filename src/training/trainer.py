@@ -35,6 +35,7 @@ except ModuleNotFoundError:
 from ..models.topo_evidential_umamba import TopoEvidentialUMamba
 from ..losses.edl_loss import EDLLoss, SoftDiceLoss, get_lambda_t
 from ..losses.contrastive_loss import PDSupervisedContrastiveLoss
+from ..losses.anchor_distribution_loss import AnchorDistributionLoss
 from ..evaluation.metrics import compute_segmentation_metrics, MetricAggregator
 from ..runtime import resolve_amp_dtype
 
@@ -80,8 +81,14 @@ class Trainer:
         self.grad_clip    = train_cfg.get("grad_clip",     1.0)
         self.num_classes  = data_cfg.get("num_classes",    4)
 
-        self.gamma        = loss_cfg.get("gamma",          0.5)
-        self.dice_weight  = float(loss_cfg.get("dice_weight", 0.0))
+        # Loss weights
+        # gamma (contrastive): reduced 0.1→0.05 so contrastive is a mild regulariser,
+        #   not the dominant term (Con raw ~3.3 → weighted 0.05*3.3 ≈ 0.165 vs 0.1*3.3 ≈ 0.33)
+        # dice_weight: increased 0.5→1.0 for stronger overlap gradient, especially RV
+        # lambda_dist: new anchor distribution term that regularises z_topo near μ
+        self.gamma        = float(loss_cfg.get("gamma",          0.05))
+        self.dice_weight  = float(loss_cfg.get("dice_weight",    1.0))
+        self.lambda_dist  = float(loss_cfg.get("lambda_dist",    0.05))
         self.temperature  = loss_cfg.get("temperature",    0.1)
         self.edl_class_weights = loss_cfg.get("edl_class_weights")
         self.dice_include_background = bool(loss_cfg.get("dice_include_background", False))
@@ -92,19 +99,20 @@ class Trainer:
         self.non_blocking = runtime_cfg.get("non_blocking", False)
         self.use_amp = runtime_cfg.get("use_amp", False) and device.type == "cuda"
         self.amp_dtype = resolve_amp_dtype(runtime_cfg.get("amp_dtype", "float32"))
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
         # Loss functions
-        self.edl_loss = EDLLoss(class_weights=self.edl_class_weights)
+        self.edl_loss  = EDLLoss(class_weights=self.edl_class_weights)
         self.dice_loss = SoftDiceLoss(
             include_background=self.dice_include_background,
             class_weights=self.dice_class_weights,
         )
-        self.con_loss = PDSupervisedContrastiveLoss(
+        self.con_loss  = PDSupervisedContrastiveLoss(
             temperature=self.temperature,
             positive_threshold=self.topo_threshold,
             positive_top_k=self.topo_positive_top_k,
         )
+        self.dist_loss = AnchorDistributionLoss()
 
         # Optimiser
         self.optimizer = AdamW(
@@ -153,9 +161,11 @@ class Trainer:
             "edl": float("inf"),
             "dice": float("inf"),
             "con": float("inf"),
+            "dist": float("inf"),
         }
         self.train_history: Dict[str, list] = {
-            "train_loss": [], "train_edl": [], "train_dice": [], "train_con": [],
+            "train_loss": [], "train_edl": [], "train_dice": [],
+            "train_con": [], "train_dist": [],
             "val_dice_mean": [],
             "val_dice_rv": [], "val_dice_myo": [], "val_dice_lv": [],
             "val_hd95_mean": [], "lr": [],
@@ -167,7 +177,7 @@ class Trainer:
 
     def _train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
-        agg = {"total": 0.0, "edl": 0.0, "dice": 0.0, "con": 0.0}
+        agg = {"total": 0.0, "edl": 0.0, "dice": 0.0, "con": 0.0, "dist": 0.0}
         n   = 0
 
         lambda_t = get_lambda_t(
@@ -193,19 +203,40 @@ class Trainer:
             with self._autocast_context():
                 # ── Forward ──────────────────────────────────────────────
                 out = self.model(images, return_projections=True)
-                evidence    = out["evidence"]       # B K H W
-                probs       = out["probs"]          # B K H W
-                projections = out["projections"]    # B D
+                evidence    = out["evidence"]       # (B, K, H, W)
+                probs       = out["probs"]          # (B, K, H, W)
+                projections = out["projections"]    # (B, d_z)  == z_topo
+                z_topo      = out["z_topo"]         # (B, d_z)
+                mu          = out["mu"]             # (B, d_z)
+                var         = out["var"]            # (B, d_z)
 
                 # ── L_EDL ────────────────────────────────────────────────
-                l_edl, edl_log = self.edl_loss(evidence, labels, lambda_t=lambda_t)
-                l_dice = self.dice_loss(probs, labels) if self.dice_weight > 0 else probs.sum() * 0.0
+                l_edl, _ = self.edl_loss(evidence, labels, lambda_t=lambda_t)
 
-                # ── L_PD-SCon ────────────────────────────────────────────
+                # ── L_Dice (weight 1.0; was 0.5) ─────────────────────────
+                l_dice = (
+                    self.dice_loss(probs, labels)
+                    if self.dice_weight > 0
+                    else probs.sum() * 0.0
+                )
+
+                # ── L_PD-SCon (weight 0.05; was 0.1) ─────────────────────
                 l_con = self.con_loss(projections, topo_vec)
 
-                # ── Total loss ───────────────────────────────────────────
-                loss = l_edl + self.dice_weight * l_dice + self.gamma * l_con
+                # ── L_dist: topology-anchor distribution (NEW) ───────────
+                # Detach z_topo for the dist loss so its gradient only flows
+                # through the anchor heads (μ, σ²), not z_topo itself.
+                # The metric loss already shapes z_topo; dist stabilises μ/σ².
+                l_dist = self.dist_loss(z_topo, mu, var)
+
+                # ── Total ────────────────────────────────────────────────
+                # L = L_EDL + 1.0·L_Dice + 0.05·L_metric + 0.05·L_dist
+                loss = (
+                    l_edl
+                    + self.dice_weight  * l_dice
+                    + self.gamma        * l_con
+                    + self.lambda_dist  * l_dist
+                )
 
             # ── Backward ─────────────────────────────────────────────────
             self.optimizer.zero_grad(set_to_none=True)
@@ -225,6 +256,7 @@ class Trainer:
             agg["edl"]   += l_edl.item() * B
             agg["dice"]  += l_dice.item() * B
             agg["con"]   += l_con.item() * B
+            agg["dist"]  += l_dist.item() * B
             n += B
 
             pbar.set_postfix({
@@ -232,6 +264,7 @@ class Trainer:
                 "edl":  f"{l_edl.item():.4f}",
                 "dice": f"{l_dice.item():.4f}",
                 "con":  f"{l_con.item():.4f}",
+                "dist": f"{l_dist.item():.4f}",
             })
 
         return {k: v / n for k, v in agg.items()}
@@ -288,9 +321,10 @@ class Trainer:
             # Train
             train_metrics = self._train_epoch(epoch)
             self.best_train_metrics["total"] = min(self.best_train_metrics["total"], train_metrics["total"])
-            self.best_train_metrics["edl"] = min(self.best_train_metrics["edl"], train_metrics["edl"])
-            self.best_train_metrics["dice"] = min(self.best_train_metrics["dice"], train_metrics["dice"])
-            self.best_train_metrics["con"] = min(self.best_train_metrics["con"], train_metrics["con"])
+            self.best_train_metrics["edl"]   = min(self.best_train_metrics["edl"],   train_metrics["edl"])
+            self.best_train_metrics["dice"]  = min(self.best_train_metrics["dice"],  train_metrics["dice"])
+            self.best_train_metrics["con"]   = min(self.best_train_metrics["con"],   train_metrics["con"])
+            self.best_train_metrics["dist"]  = min(self.best_train_metrics["dist"],  train_metrics["dist"])
 
             # Scheduler step
             self.scheduler.step()
@@ -322,11 +356,12 @@ class Trainer:
                 f"Epoch {epoch+1:3d}/{self.epochs} | "
                 f"Loss: {train_metrics['total']:.4f} "
                 f"(EDL: {train_metrics['edl']:.4f}, Dice: {train_metrics['dice']:.4f}, "
-                f"Con: {train_metrics['con']:.4f}) | "
+                f"Con: {train_metrics['con']:.4f}, Dist: {train_metrics['dist']:.4f}) | "
                 f"Best Loss: {self.best_train_metrics['total']:.4f} "
                 f"(EDL: {self.best_train_metrics['edl']:.4f}, "
                 f"Dice: {self.best_train_metrics['dice']:.4f}, "
-                f"Con: {self.best_train_metrics['con']:.4f}) | "
+                f"Con: {self.best_train_metrics['con']:.4f}, "
+                f"Dist: {self.best_train_metrics['dist']:.4f}) | "
                 f"LR: {lr:.2e} | {elapsed:.1f}s"
             )
             if val_metrics:
@@ -343,11 +378,12 @@ class Trainer:
             logger.info(log_msg)
 
             # TensorBoard
-            self.writer.add_scalar("Train/Loss_Total",      train_metrics["total"], epoch)
-            self.writer.add_scalar("Train/Loss_EDL",        train_metrics["edl"],   epoch)
-            self.writer.add_scalar("Train/Loss_Dice",       train_metrics["dice"],  epoch)
-            self.writer.add_scalar("Train/Loss_Contrastive",train_metrics["con"],   epoch)
-            self.writer.add_scalar("Train/LR",              lr,                     epoch)
+            self.writer.add_scalar("Train/Loss_Total",       train_metrics["total"], epoch)
+            self.writer.add_scalar("Train/Loss_EDL",         train_metrics["edl"],   epoch)
+            self.writer.add_scalar("Train/Loss_Dice",        train_metrics["dice"],  epoch)
+            self.writer.add_scalar("Train/Loss_Contrastive", train_metrics["con"],   epoch)
+            self.writer.add_scalar("Train/Loss_Dist",        train_metrics["dist"],  epoch)
+            self.writer.add_scalar("Train/LR",               lr,                     epoch)
             for k, v in val_metrics.items():
                 if v != float("inf"):
                     self.writer.add_scalar(f"Val/{k}", v, epoch)
@@ -357,6 +393,7 @@ class Trainer:
             self.train_history["train_edl"].append(train_metrics["edl"])
             self.train_history["train_dice"].append(train_metrics["dice"])
             self.train_history["train_con"].append(train_metrics["con"])
+            self.train_history["train_dist"].append(train_metrics["dist"])
             self.train_history["val_dice_mean"].append(val_metrics.get("val_dice_mean", None))
             self.train_history["val_dice_rv"].append(val_metrics.get("val_dice_rv", None))
             self.train_history["val_dice_myo"].append(val_metrics.get("val_dice_myo", None))
@@ -370,7 +407,8 @@ class Trainer:
             f"Best Loss: {self.best_train_metrics['total']:.4f} "
             f"(EDL: {self.best_train_metrics['edl']:.4f} "
             f"Dice: {self.best_train_metrics['dice']:.4f} "
-            f"Con: {self.best_train_metrics['con']:.4f}) | "
+            f"Con: {self.best_train_metrics['con']:.4f} "
+            f"Dist: {self.best_train_metrics['dist']:.4f}) | "
             f"Best val Dice: {self.best_val_metrics['val_dice_mean']:.4f} "
             f"(RV:{self.best_val_metrics['val_dice_rv']:.3f} "
             f"Myo:{self.best_val_metrics['val_dice_myo']:.3f} "

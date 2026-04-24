@@ -193,6 +193,7 @@ def plot_reliability_diagram(
     bin_counts: np.ndarray,
     ece:        float,
     save_path:  str,
+    title:      str = "Reliability Diagram",
 ):
     n_bins = len(bin_accs)
     x = np.arange(n_bins)
@@ -209,7 +210,7 @@ def plot_reliability_diagram(
 
     ax.set_xlabel("Confidence Bin")
     ax.set_ylabel("Accuracy / Confidence")
-    ax.set_title(f"Reliability Diagram  (ECE = {ece:.4f})")
+    ax.set_title(f"{title}  (ECE = {ece:.4f})")
     ax.set_xticks(x[::3])
     ax.set_xticklabels([f"{i/n_bins:.2f}" for i in range(n_bins)][::3])
     ax.set_ylim(0, 1)

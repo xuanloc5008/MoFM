@@ -33,6 +33,7 @@ from src.data.acdc           import collect_acdc_slices, SliceDataset
 from src.data.mnm            import collect_mnm1_slices, collect_mnm2_slices, DomainShiftDataset
 from src.data.transforms     import get_val_transforms
 from src.models.topo_evidential_umamba import build_model
+from src.models.anchor_module import mahalanobis_anchor_distance, self_calibrated_confidence
 from src.runtime             import (
     configure_torch_runtime,
     dataloader_kwargs,
@@ -85,6 +86,7 @@ def run_inference_batch(
     use_amp: bool = False,
     amp_dtype: torch.dtype = torch.float32,
     collect_uncertainty: bool = True,
+    cal_gamma: float = 0.01,
 ) -> dict:
     """
     Run model inference over a DataLoader.
@@ -96,6 +98,8 @@ def run_inference_batch(
       all_labels        : (N_flat,)    flat label array for ECE
       all_uncertainty   : (N_flat,)    flat uncertainty array
       all_is_correct    : (N_flat,)    bool
+      all_conf_raw      : (N_flat,)    max-class raw Dirichlet confidence
+      all_conf_cal      : (N_flat,)    anchor-calibrated confidence
       sample_tuples     : list of (image, pred_seg, gt_seg, uncertainty) for plots
       clinical_agg      : ClinicalMetricAggregator
     """
@@ -107,6 +111,8 @@ def run_inference_batch(
     all_labels     = []
     all_uncertainty= []
     all_is_correct = []
+    all_conf_raw   = []
+    all_conf_cal   = []
     sample_tuples  = []
     for batch in tqdm(dataloader, desc="Inference", leave=False):
         images  = batch["image"].to(device, non_blocking=non_blocking)
@@ -121,6 +127,20 @@ def run_inference_batch(
         probs      = out["probs"].float().cpu().numpy()          # B K H W
         seg_maps   = probs.argmax(axis=1)                # B H W
         unc_maps   = out["uncertainty"].float().cpu().numpy().squeeze(1)  # B H W
+
+        # ── Anchor-calibrated confidence ─────────────────────────────────
+        # conf_raw: per-pixel max-class probability (B, 1, H, W)
+        # d_mah:    per-sample Mahalanobis distance  (B,)
+        # conf_cal: conf_raw · exp(−γ · d_mah), broadcast over spatial dims
+        conf_raw_t = out["probs"].float().amax(dim=1, keepdim=True)    # (B,1,H,W)
+        d_mah      = mahalanobis_anchor_distance(
+            out["z_topo"].float(), out["mu"].float(), out["var"].float()
+        )                                                               # (B,)
+        conf_cal_t = self_calibrated_confidence(
+            conf_raw_t, d_mah, gamma=cal_gamma
+        )                                                               # (B,1,H,W)
+        conf_raw_np = conf_raw_t.squeeze(1).cpu().numpy()              # B H W
+        conf_cal_np = conf_cal_t.squeeze(1).cpu().numpy()              # B H W
 
         for i in range(len(images)):
             pid      = batch.get("patient_id", ["unknown"] * len(images))[i]
@@ -166,6 +186,8 @@ def run_inference_batch(
             all_labels.append(flat_labels)
             all_uncertainty.append(flat_unc)
             all_is_correct.append(flat_corr)
+            all_conf_raw.append(conf_raw_np[i].reshape(-1))
+            all_conf_cal.append(conf_cal_np[i].reshape(-1))
 
             # Collect representative samples for visualization
             if len(sample_tuples) < 5:
@@ -179,6 +201,8 @@ def run_inference_batch(
         "all_labels":      np.concatenate(all_labels,     axis=0) if all_labels else np.array([]),
         "all_uncertainty": np.concatenate(all_uncertainty, axis=0) if all_uncertainty else np.array([]),
         "all_is_correct":  np.concatenate(all_is_correct,  axis=0) if all_is_correct else np.array([]),
+        "all_conf_raw":    np.concatenate(all_conf_raw,    axis=0) if all_conf_raw else np.array([]),
+        "all_conf_cal":    np.concatenate(all_conf_cal,    axis=0) if all_conf_cal else np.array([]),
         "sample_tuples":   sample_tuples,
         "clinical_agg":    clinical_agg,
     }
@@ -212,6 +236,7 @@ def main():
     batch_size   = runtime_settings["val_batch_size"]
     num_workers  = runtime_settings["num_workers"]
     ece_bins     = cfg["evaluation"].get("ece_bins", 15)
+    cal_gamma    = float(cfg["loss"].get("gamma", 0.01))
     amp_dtype    = resolve_amp_dtype(runtime_settings["amp_dtype"])
     if num_workers != runtime_settings["requested_num_workers"]:
         logger.warning(
@@ -252,6 +277,7 @@ def main():
         non_blocking=runtime_settings["non_blocking"],
         use_amp=runtime_settings["use_amp"],
         amp_dtype=amp_dtype,
+        cal_gamma=cal_gamma,
     )
     acdc_summary  = acdc_results["metric_agg"].summary()
 
@@ -281,15 +307,39 @@ def main():
 
     # ── Calibration ─────────────────────────────────────────────────────────
     if len(acdc_results["all_probs"]) > 0:
-        ece, bin_accs, bin_confs, bin_counts = expected_calibration_error(
+        # ECE on raw Dirichlet probabilities
+        ece_raw, bin_accs_raw, bin_confs_raw, bin_counts_raw = expected_calibration_error(
             acdc_results["all_probs"],
             acdc_results["all_labels"],
             n_bins=ece_bins,
         )
-        logger.info(f"ACDC ECE: {ece:.4f}")
+        # ECE on anchor-calibrated confidence (1-D confidence array)
+        # The function's else-branch handles ndim==1: conf > 0.5 → prediction, is_correct → label
+        ece_cal, bin_accs_cal, bin_confs_cal, bin_counts_cal = expected_calibration_error(
+            acdc_results["all_conf_cal"],
+            acdc_results["all_is_correct"].astype(int),
+            n_bins=ece_bins,
+        )
+
+        mean_conf_raw = float(acdc_results["all_conf_raw"].mean())
+        mean_conf_cal = float(acdc_results["all_conf_cal"].mean())
+        cal_reduction = mean_conf_raw - mean_conf_cal
+
+        logger.info("── Confidence Calibration (ACDC) ──────────────────────")
+        logger.info(f"  Raw confidence  (mean): {mean_conf_raw:.4f}  |  ECE: {ece_raw:.4f}")
+        logger.info(f"  Anchor-cal conf (mean): {mean_conf_cal:.4f}  |  ECE: {ece_cal:.4f}")
+        logger.info(f"  Calibration reduction:  {cal_reduction:+.4f}  (γ={cal_gamma})")
+        logger.info("────────────────────────────────────────────────────────")
+
         plot_reliability_diagram(
-            bin_accs, bin_confs, bin_counts, ece,
-            os.path.join(fig_dir, "acdc_reliability_diagram.png"),
+            bin_accs_raw, bin_confs_raw, bin_counts_raw, ece_raw,
+            os.path.join(fig_dir, "acdc_reliability_raw.png"),
+            title="ACDC — Reliability (Raw Confidence)",
+        )
+        plot_reliability_diagram(
+            bin_accs_cal, bin_confs_cal, bin_counts_cal, ece_cal,
+            os.path.join(fig_dir, "acdc_reliability_calibrated.png"),
+            title="ACDC — Reliability (Anchor-Calibrated Confidence)",
         )
 
         aurrc = uncertainty_error_correlation(
@@ -308,9 +358,14 @@ def main():
             baseline_acc=acdc_results["all_is_correct"].mean(),
         )
 
-        # Save calibration CSV
+        # Save calibration CSV — raw vs anchor-calibrated side-by-side
         pd.DataFrame({
-            "ece": [ece], "aurrc": [aurrc],
+            "ece_raw":       [ece_raw],
+            "ece_calibrated":[ece_cal],
+            "mean_conf_raw": [mean_conf_raw],
+            "mean_conf_cal": [mean_conf_cal],
+            "cal_reduction": [cal_reduction],
+            "aurrc":         [aurrc],
         }).to_csv(os.path.join(eval_dir, "acdc_calibration.csv"), index=False)
 
     # ── Clinical Metrics ────────────────────────────────────────────────────
@@ -376,6 +431,7 @@ def main():
                 non_blocking=runtime_settings["non_blocking"],
                 use_amp=runtime_settings["use_amp"],
                 amp_dtype=amp_dtype,
+                cal_gamma=cal_gamma,
             )
             v_sum = v_res["metric_agg"].summary()
             vendor_dice[vendor] = [r["dice_mean"] for r in v_res["dice_records"]
@@ -389,6 +445,7 @@ def main():
             non_blocking=runtime_settings["non_blocking"],
             use_amp=runtime_settings["use_amp"],
             amp_dtype=amp_dtype,
+            cal_gamma=cal_gamma,
         )
         mnm1_df = mnm1_results["metric_agg"].to_dataframe()
         mnm1_df.to_csv(os.path.join(eval_dir, "mnm1_metrics.csv"), index=False)
@@ -428,6 +485,7 @@ def main():
             non_blocking=runtime_settings["non_blocking"],
             use_amp=runtime_settings["use_amp"],
             amp_dtype=amp_dtype,
+            cal_gamma=cal_gamma,
         )
         mnm2_summary = mnm2_results["metric_agg"].summary()
         mnm2_df = mnm2_results["metric_agg"].to_dataframe()
@@ -448,6 +506,7 @@ def main():
                 non_blocking=runtime_settings["non_blocking"],
                 use_amp=runtime_settings["use_amp"],
                 amp_dtype=amp_dtype,
+                cal_gamma=cal_gamma,
             )
             vendor_dice_2[vendor] = [r["dice_mean"] for r in v_res["dice_records"]
                                      if "dice_mean" in r]

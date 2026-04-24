@@ -25,6 +25,7 @@ from monai.transforms import (
     RandAdjustContrastd,
     RandScaleIntensityd,
     RandShiftIntensityd,
+    RandHistogramShiftd,
     # Utility
     EnsureTyped,
     CastToTyped,
@@ -94,37 +95,38 @@ def get_tensor_transforms() -> list:
 
 def get_train_augmentation_transforms(cfg: Dict = None) -> list:
     cfg = cfg or {}
-    rr_prob   = cfg.get("rand_rotate_prob", 0.6)
-    rr_range  = cfg.get("rand_rotate_range", 0.2618)   # ~15°
+    rr_prob   = cfg.get("rand_rotate_prob", 0.75)
+    rr_range  = cfg.get("rand_rotate_range", 0.3491)   # ~20°
     rf_prob   = cfg.get("rand_flip_prob", 0.0)
-    rz_prob   = cfg.get("rand_zoom_prob", 0.4)
-    rz_range  = cfg.get("rand_zoom_range", [0.9, 1.1])
-    rn_prob   = cfg.get("rand_gaussian_noise_prob", 0.15)
-    rn_std    = cfg.get("rand_gaussian_noise_std", 0.03)
-    rb_prob   = cfg.get("rand_bias_field_prob", 0.25)
-    rg_prob   = cfg.get("rand_gibbs_noise_prob", 0.15)
-    rc_prob   = cfg.get("rand_adjust_contrast_prob", 0.2)
-    rs_prob   = cfg.get("rand_shift_intensity_prob", 0.15)
-    rsi_prob  = cfg.get("rand_scale_intensity_prob", 0.15)
-    rgs_prob  = cfg.get("rand_gaussian_smooth_prob", 0.1)
-    rgs_sigma = tuple(cfg.get("rand_gaussian_smooth_sigma", [0.25, 0.8]))
-    rb_coeff  = tuple(cfg.get("rand_bias_field_coeff_range", [0.0, 0.08]))
-    rg_alpha  = tuple(cfg.get("rand_gibbs_alpha", [0.0, 0.5]))
-    rc_gamma  = tuple(cfg.get("rand_adjust_contrast_gamma", [0.85, 1.15]))
-    rsi_factor = cfg.get("rand_scale_intensity_factor", 0.1)
-    rs_offset  = cfg.get("rand_shift_intensity_offset", 0.05)
+    rz_prob   = cfg.get("rand_zoom_prob", 0.55)
+    rz_range  = cfg.get("rand_zoom_range", [0.8, 1.2])
+    rn_prob   = cfg.get("rand_gaussian_noise_prob", 0.30)
+    rn_std    = cfg.get("rand_gaussian_noise_std", 0.07)
+    rb_prob   = cfg.get("rand_bias_field_prob", 0.45)
+    rg_prob   = cfg.get("rand_gibbs_noise_prob", 0.30)
+    rc_prob   = cfg.get("rand_adjust_contrast_prob", 0.45)
+    rs_prob   = cfg.get("rand_shift_intensity_prob", 0.30)
+    rsi_prob  = cfg.get("rand_scale_intensity_prob", 0.30)
+    rgs_prob  = cfg.get("rand_gaussian_smooth_prob", 0.25)
+    rgs_sigma = tuple(cfg.get("rand_gaussian_smooth_sigma", [0.25, 1.5]))
+    rb_coeff  = tuple(cfg.get("rand_bias_field_coeff_range", [0.0, 0.20]))
+    rg_alpha  = tuple(cfg.get("rand_gibbs_alpha", [0.0, 0.80]))
+    rc_gamma  = tuple(cfg.get("rand_adjust_contrast_gamma", [0.5, 1.8]))
+    rsi_factor = cfg.get("rand_scale_intensity_factor", 0.25)
+    rs_offset  = cfg.get("rand_shift_intensity_offset", 0.15)
     affine_prob = cfg.get("rand_affine_prob", max(rr_prob, rz_prob))
-    elastic_prob = cfg.get("rand_elastic_prob", 0.15)
-    translate = cfg.get("rand_translate_range", [8, 8])
-    shear     = cfg.get("rand_shear_range", [0.025, 0.025])
-    elastic_spacing = tuple(cfg.get("rand_elastic_spacing", [32, 32]))
-    elastic_magnitude = tuple(cfg.get("rand_elastic_magnitude", [1.0, 2.5]))
+    elastic_prob = cfg.get("rand_elastic_prob", 0.25)
+    translate = cfg.get("rand_translate_range", [12, 12])
+    shear     = cfg.get("rand_shear_range", [0.04, 0.04])
+    elastic_spacing   = tuple(cfg.get("rand_elastic_spacing",   [24, 24]))
+    elastic_magnitude = tuple(cfg.get("rand_elastic_magnitude", [1.5, 4.0]))
     scale_range = [rz_range[0] - 1.0, rz_range[1] - 1.0]
+    # Histogram shift — new; simulates scanner-specific LUT / windowing
+    rhs_prob = cfg.get("rand_histogram_shift_prob", 0.30)
+    rhs_ctrl = cfg.get("rand_histogram_shift_num_control_points", 10)
 
     return [
-        # ACDC cardiac MRI benefits most from mild rigid motion, scale jitter,
-        # and modest non-rigid deformation. Large flips are disabled by default
-        # because they can be anatomically implausible after dataset alignment.
+        # ── Spatial ──────────────────────────────────────────────────────
         RandAffined(
             keys=["image", "label"],
             prob=affine_prob,
@@ -153,7 +155,9 @@ def get_train_augmentation_transforms(cfg: Dict = None) -> list:
             spatial_axis=1,
         ),
 
-        # ── Intensity augmentation (scanner-style artifacts) ──────────────
+        # ── Intensity / scanner-style augmentation ────────────────────────
+        # Strengthened vs v1 to force z_topo/c_app disentanglement and
+        # improve robustness across Canon/GE/Philips/Siemens scanners.
         RandGaussianNoised(keys=["image"], prob=rn_prob, std=rn_std),
         RandGaussianSmoothd(keys=["image"], prob=rgs_prob, sigma_x=rgs_sigma, sigma_y=rgs_sigma),
         RandBiasFieldd(keys=["image"], prob=rb_prob, coeff_range=rb_coeff),
@@ -161,6 +165,13 @@ def get_train_augmentation_transforms(cfg: Dict = None) -> list:
         RandAdjustContrastd(keys=["image"], prob=rc_prob, gamma=rc_gamma),
         RandScaleIntensityd(keys=["image"], prob=rsi_prob, factors=rsi_factor),
         RandShiftIntensityd(keys=["image"], prob=rs_prob, offsets=rs_offset),
+        # Histogram shift: redistributes voxel intensities along a random piecewise
+        # linear map, mimicking how different scanners apply different LUT windows.
+        RandHistogramShiftd(
+            keys=["image"],
+            prob=rhs_prob,
+            num_control_points=rhs_ctrl,
+        ),
     ]
 
 
