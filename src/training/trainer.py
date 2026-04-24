@@ -284,7 +284,7 @@ class Trainer:
             spacing = (1.5, 1.5)   # default spacing for 2-D slice
 
             with self._autocast_context():
-                seg_map, _ = self.model.predict(images)
+                seg_map = self.model.predict(images)[0]
             seg_map = seg_map.cpu().numpy()
 
             for i in range(len(images)):
